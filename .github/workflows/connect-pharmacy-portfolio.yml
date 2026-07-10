@@ -1,15 +1,16 @@
 name: Connect pharmacy portfolio
 
 on:
-  push:
-    paths:
-      - '.github/workflows/connect-pharmacy-portfolio.yml'
+  issues:
+    types: [opened]
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   patch:
+    if: contains(github.event.issue.title, 'Run pharmacy portfolio patch')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -41,5 +42,3 @@ jobs:
           git add src/main.jsx
           git commit -m "feat: use operational pharmacy portfolio view"
           git push
-
-# Trigger: 2026-07-10 pharmacy portfolio rollout

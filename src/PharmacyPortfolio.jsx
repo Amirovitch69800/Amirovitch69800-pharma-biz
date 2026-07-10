@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { supabase } from './lib/supabase.js';
 import './pharmacy-portfolio.css';
+import './pharmacy-multibrand.css';
 
 const RELATION_STATUSES = [
   ['not_referenced', 'Non référencée'],

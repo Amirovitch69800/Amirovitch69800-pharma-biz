@@ -41,3 +41,5 @@ jobs:
           git add src/main.jsx
           git commit -m "feat: use operational pharmacy portfolio view"
           git push
+
+# Trigger: 2026-07-10 pharmacy portfolio rollout

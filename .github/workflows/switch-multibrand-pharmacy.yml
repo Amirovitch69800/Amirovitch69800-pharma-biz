@@ -1,0 +1,30 @@
+name: Switch multibrand pharmacy screen
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: write
+  issues: write
+jobs:
+  patch:
+    if: contains(github.event.issue.title, 'Switch multibrand pharmacy screen')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch main import
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src/main.jsx')
+          s=p.read_text()
+          s=s.replace("import PharmacyPortfolio from './PharmacyPortfolio.jsx';", "import PharmacyPortfolio from './PharmacyPortfolioMulti.jsx';")
+          p.write_text(s)
+          PY
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main.jsx
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "feat: activate multibrand pharmacy account view"
+          git push

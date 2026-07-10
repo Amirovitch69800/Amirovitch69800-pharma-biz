@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { supabase } from './lib/supabase.js';
 import './styles.css';
+import PharmacyPortfolio from './PharmacyPortfolio.jsx';
 
 const REPO_URL = 'https://amirovitch69800-pharma-biz.vercel.app';
 const WEBHOOK_BASE = 'https://mfgstfazcrpvwxydczrd.functions.supabase.co/twilio-whatsapp-webhook';
@@ -98,7 +99,7 @@ function Workspace({ session }) {
 
 function Screen({ tab, state, reload }) {
   if (tab === 'today') return <Today state={state} />;
-  if (tab === 'pharmacies') return <Pharmacies state={state} reload={reload} />;
+  if (tab === 'pharmacies') return <PharmacyPortfolio state={state} reload={reload} />;
   if (tab === 'order') return <QuickOrder state={state} reload={reload} />;
   if (tab === 'commissions') return <Commissions state={state} />;
   if (tab === 'ai') return <AiActions state={state} reload={reload} />;

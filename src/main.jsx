@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { supabase } from './lib/supabase.js';
 import './styles.css';
-import PharmacyPortfolio from './PharmacyPortfolio.jsx';
+import PharmacyPortfolio from './PharmacyPortfolioMulti.jsx';
 
 const REPO_URL = 'https://amirovitch69800-pharma-biz.vercel.app';
 const WEBHOOK_BASE = 'https://mfgstfazcrpvwxydczrd.functions.supabase.co/twilio-whatsapp-webhook';

@@ -1,6 +1,6 @@
 # PharmaBiz
 
-Cockpit commercial terrain pour gérer pharmacies, marques, produits, commandes, commissions, notes de frais et imports.
+Cockpit commercial et opérationnel pour piloter le développement terrain de marques en pharmacie.
 
 ## Stack
 
@@ -34,12 +34,24 @@ amir.ounissi69@gmail.com
 
 Le trigger Supabase créera automatiquement le profil admin et l'agent AG-001.
 
-## Modules V1
+## Modules actifs
 
 - Dashboard
-- Pharmacies
-- Produits
+- Comptes pharmacies multimarques
+- Activités et relances
+- Réseau terrain : animateurs et missions
 - Commandes
 - Commissions
-- Notes de frais
-- Imports
+- Marques
+- Assistant IA / WhatsApp
+- Paramètres
+
+## Réseau terrain
+
+Le front actif est `src/main-v3.jsx`. Le module permet de créer des animateurs, affecter des missions, saisir les résultats sell-out et valider les missions.
+
+Appliquer la migration suivante dans Supabase avant utilisation :
+
+```text
+supabase/migrations/20260711_field_missions_v1.sql
+```

@@ -23,7 +23,7 @@ export default function BrandWorkspace({ session }) {
       </header>
       <div className="bp-workspace-content">
         {error && <div className="pb-alert" role="alert"><span>{error}</span></div>}
-        <BrandPortal state={state} />
+        <BrandPortal session={session} state={state} />
       </div>
     </main>
   );

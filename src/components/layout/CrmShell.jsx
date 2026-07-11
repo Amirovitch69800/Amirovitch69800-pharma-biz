@@ -7,7 +7,6 @@ const navigation = [
     label: 'Pilotage',
     items: [
       ['dashboard', 'Vue d’ensemble', 'home'],
-      ['brand-space', 'Espace marque', 'sparkles'],
       ['accounts', 'Comptes', 'building'],
       ['pipeline', 'Pipeline', 'board'],
       ['activities', 'Activités', 'check'],
@@ -24,23 +23,7 @@ const navigation = [
   },
 ];
 
-export default function CrmShell({
-  activeTab,
-  children,
-  error,
-  lastSyncedAt,
-  onClearError,
-  onCreateActivity,
-  onOpenAccount,
-  onReload,
-  onSignOut,
-  onTabChange,
-  profile,
-  search,
-  searchResults,
-  setSearch,
-  session,
-}) {
+export default function CrmShell({ activeTab, children, error, lastSyncedAt, onClearError, onCreateActivity, onOpenAccount, onReload, onSignOut, onTabChange, profile, search, searchResults, setSearch, session }) {
   const [quickMenuOpen, setQuickMenuOpen] = useState(false);
 
   useEffect(() => {

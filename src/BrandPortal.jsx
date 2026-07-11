@@ -70,8 +70,10 @@ export default function BrandPortal({ session, state }) {
   const relations = useMemo(() => state.relations.filter((relation) => !brand?.id || relation.brand_id === brand.id), [brand?.id, state.relations]);
   const commissions = useMemo(() => state.commissions.filter((commission) => !brand?.id || commission.brand_id === brand.id), [brand?.id, state.commissions]);
   const brandRequests = useMemo(() => requests.filter((item) => !brand?.id || item.brand_id === brand.id), [brand?.id, requests]);
-  const requestIds = useMemo(() => new Set(brandRequests.map((item) => item.id)), [brandRequests]);
-  const brandMissions = useMemo(() => missions.filter((item) => requestIds.has(item.brand_request_id)), [missions, requestIds]);
+  const brandMissions = useMemo(() => {
+    const ids = new Set(brandRequests.map((item) => item.id));
+    return missions.filter((item) => ids.has(item.brand_request_id));
+  }, [brandRequests, missions]);
   const sellIn = orders.reduce((sum, order) => sum + Number(order.total_after_discount_ht || order.total_ht || 0), 0);
   const active = relations.filter((relation) => ['active', 'premium', 'ambassador', 'ambassadrice'].includes(relation.status)).length;
   const pipeline = relations.filter((relation) => ['prospect', 'contacted', 'interested'].includes(relation.status)).length;

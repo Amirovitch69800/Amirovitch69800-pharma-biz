@@ -4,6 +4,7 @@ import { supabase } from './lib/supabase.js';
 import Workspace from './features/workspace/Workspace.jsx';
 import './app-v2.css';
 import './field-missions.css';
+import './brand-portal.css';
 
 function Auth() {
   const [email, setEmail] = useState('');
@@ -24,16 +25,8 @@ function Auth() {
     <main className="pb-auth">
       <section className="pb-auth-side">
         <div className="pb-auth-brand"><span className="pb-brand-mark">PB</span><strong>PharmaBiz</strong></div>
-        <div>
-          <span className="pb-eyebrow">Field CRM</span>
-          <h1>Le cockpit commercial des équipes pharmacie.</h1>
-          <p>Comptes, opportunités, visites et réassorts dans une seule vue de travail.</p>
-        </div>
-        <div className="pb-auth-feature-list">
-          <span><i />Un compte, plusieurs marques</span>
-          <span><i />Des priorités terrain, pas des tableaux décoratifs</span>
-          <span><i />Une vision opérationnelle du portefeuille</span>
-        </div>
+        <div><span className="pb-eyebrow">Field CRM</span><h1>Le cockpit commercial des équipes pharmacie.</h1><p>Comptes, opportunités, visites et réassorts dans une seule vue de travail.</p></div>
+        <div className="pb-auth-feature-list"><span><i />Un compte, plusieurs marques</span><span><i />Des priorités terrain, pas des tableaux décoratifs</span><span><i />Une vision opérationnelle du portefeuille</span></div>
       </section>
       <section className="pb-auth-form-side">
         <form className="pb-auth-form" onSubmit={submit}>

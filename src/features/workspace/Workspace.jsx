@@ -8,6 +8,7 @@ import Dashboard from '../dashboard/Dashboard.jsx';
 import IntegrationsView from '../integrations/IntegrationsView.jsx';
 import PipelineView from '../pipeline/PipelineView.jsx';
 import FieldMissions from '../../FieldMissions.jsx';
+import OperationsFlow from '../../OperationsFlow.jsx';
 import {
   AttentionCenterView,
   BrandsView,
@@ -41,6 +42,7 @@ export default function Workspace({ session }) {
 
   let content;
   if (activeTab === 'dashboard') content = <Dashboard onCompleteTask={completeTask} onNavigate={setActiveTab} onOpenAccount={openAccount} state={state} />;
+  else if (activeTab === 'operations') content = <OperationsFlow state={state} />;
   else if (activeTab === 'accounts') content = <AccountsView onAddRelation={addRelation} onCreateTask={createTask} onSelectAccount={selectAccount} onUpdateRelation={updateRelation} selectedAccountId={selectedAccountId} state={state} />;
   else if (activeTab === 'pipeline') content = <PipelineView onOpenAccount={openAccount} state={state} />;
   else if (activeTab === 'activities') content = <ActivitiesView composerKey={composerKey} onCompleteTask={completeTask} onCreateTask={createTask} state={state} />;

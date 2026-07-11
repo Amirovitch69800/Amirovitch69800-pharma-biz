@@ -25,15 +25,35 @@ create index if not exists field_missions_brand_request_id_idx on public.field_m
 
 alter table public.brand_requests enable row level security;
 
+drop policy if exists "brand users read own requests" on public.brand_requests;
 create policy "brand users read own requests" on public.brand_requests
-for select to authenticated using (created_by = auth.uid() or exists (
-  select 1 from public.profiles p where p.id = auth.uid() and lower(coalesce(p.role, p.user_type, p.account_type, '')) in ('admin','admin_pharmabiz','pharmabiz')
-));
+for select to authenticated using (
+  created_by = auth.uid()
+  or exists (
+    select 1 from public.profiles p
+    where p.id = auth.uid()
+      and lower(coalesce(to_jsonb(p)->>'role', to_jsonb(p)->>'user_type', to_jsonb(p)->>'account_type', '')) in ('admin','admin_pharmabiz','pharmabiz')
+  )
+);
 
+drop policy if exists "brand users create requests" on public.brand_requests;
 create policy "brand users create requests" on public.brand_requests
 for insert to authenticated with check (created_by = auth.uid());
 
+drop policy if exists "brand users update own drafts" on public.brand_requests;
 create policy "brand users update own drafts" on public.brand_requests
-for update to authenticated using (created_by = auth.uid() or exists (
-  select 1 from public.profiles p where p.id = auth.uid() and lower(coalesce(p.role, p.user_type, p.account_type, '')) in ('admin','admin_pharmabiz','pharmabiz')
-));
+for update to authenticated using (
+  created_by = auth.uid()
+  or exists (
+    select 1 from public.profiles p
+    where p.id = auth.uid()
+      and lower(coalesce(to_jsonb(p)->>'role', to_jsonb(p)->>'user_type', to_jsonb(p)->>'account_type', '')) in ('admin','admin_pharmabiz','pharmabiz')
+  )
+) with check (
+  created_by = auth.uid()
+  or exists (
+    select 1 from public.profiles p
+    where p.id = auth.uid()
+      and lower(coalesce(to_jsonb(p)->>'role', to_jsonb(p)->>'user_type', to_jsonb(p)->>'account_type', '')) in ('admin','admin_pharmabiz','pharmabiz')
+  )
+);

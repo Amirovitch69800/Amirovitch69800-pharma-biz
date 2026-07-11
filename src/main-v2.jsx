@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { supabase } from './lib/supabase.js';
 import Workspace from './features/workspace/Workspace.jsx';
 import './app-v2.css';
+import './field-missions.css';
 
 function Auth() {
   const [email, setEmail] = useState('');

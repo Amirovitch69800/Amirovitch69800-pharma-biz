@@ -18,6 +18,7 @@ const navigation = [
       ['orders', 'Commandes', 'bag'],
       ['commissions', 'Commissions', 'chart'],
       ['brands', 'Marques', 'sparkles'],
+      ['field-network', 'Réseau terrain', 'building'],
     ],
   },
 ];

@@ -7,6 +7,7 @@ import ActivitiesView from '../activities/ActivitiesView.jsx';
 import Dashboard from '../dashboard/Dashboard.jsx';
 import IntegrationsView from '../integrations/IntegrationsView.jsx';
 import PipelineView from '../pipeline/PipelineView.jsx';
+import FieldMissions from '../../FieldMissions.jsx';
 import {
   AttentionCenterView,
   BrandsView,
@@ -87,6 +88,8 @@ export default function Workspace({ session }) {
     content = <CommissionsView state={state} />;
   } else if (activeTab === 'brands') {
     content = <BrandsView state={state} />;
+  } else if (activeTab === 'field-network') {
+    content = <FieldMissions state={state} />;
   } else if (activeTab === 'assistant') {
     content = <AttentionCenterView state={state} />;
   } else if (activeTab === 'integrations') {

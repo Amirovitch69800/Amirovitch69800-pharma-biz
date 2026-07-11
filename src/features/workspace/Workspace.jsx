@@ -5,6 +5,7 @@ import { supabase } from '../../lib/supabase.js';
 import AccountsView from '../accounts/AccountsView.jsx';
 import ActivitiesView from '../activities/ActivitiesView.jsx';
 import Dashboard from '../dashboard/Dashboard.jsx';
+import IntegrationsView from '../integrations/IntegrationsView.jsx';
 import PipelineView from '../pipeline/PipelineView.jsx';
 import {
   AttentionCenterView,
@@ -29,8 +30,10 @@ export default function Workspace({ session }) {
     addRelation,
     clearError,
     completeTask,
+    createOrder,
     createTask,
     error,
+    getOrderCustomerContext,
     lastSyncedAt,
     loading,
     reload,
@@ -79,13 +82,15 @@ export default function Workspace({ session }) {
   } else if (activeTab === 'activities') {
     content = <ActivitiesView composerKey={composerKey} onCompleteTask={completeTask} onCreateTask={createTask} state={state} />;
   } else if (activeTab === 'orders') {
-    content = <OrdersView state={state} />;
+    content = <OrdersView onCreateOrder={createOrder} onGetCustomerContext={getOrderCustomerContext} state={state} />;
   } else if (activeTab === 'commissions') {
     content = <CommissionsView state={state} />;
   } else if (activeTab === 'brands') {
     content = <BrandsView state={state} />;
   } else if (activeTab === 'assistant') {
     content = <AttentionCenterView state={state} />;
+  } else if (activeTab === 'integrations') {
+    content = <IntegrationsView state={state} />;
   } else {
     content = <SettingsView lastSyncedAt={lastSyncedAt} profile={state.profile} session={session} state={state} />;
   }

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import Icon from '../../components/ui/Icon.jsx';
 import { formatDate, formatDateTime, formatLabel, formatMoney } from '../../lib/formatters.js';
 
@@ -6,15 +6,373 @@ function EmptyState({ icon, message, title }) {
   return <div className="pb-empty-state"><Icon name={icon} size={24} /><strong>{title}</strong><span>{message}</span></div>;
 }
 
-export function OrdersView({ state }) {
+function todayInputValue() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function emptyOrderLine() {
+  return {
+    productId: '',
+    quantity: '1',
+    unitPriceHt: '',
+    productQuery: '',
+  };
+}
+
+function normalizeSearch(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+function scoreProduct(product, query) {
+  const normalizedQuery = normalizeSearch(query);
+  if (!normalizedQuery) return 1;
+  const name = normalizeSearch(product.name);
+  const reference = normalizeSearch(product.reference);
+  const category = normalizeSearch(product.category);
+  const haystack = `${name} ${reference} ${category}`;
+  if (name === normalizedQuery || reference === normalizedQuery) return 100;
+  if (name.startsWith(normalizedQuery) || reference.startsWith(normalizedQuery)) return 80;
+  if (haystack.includes(normalizedQuery)) return 50;
+  return 0;
+}
+
+function ProductCombobox({ disabled, onSelect, products, selectedProduct, value }) {
+  const [open, setOpen] = useState(false);
+  const query = value ?? selectedProduct?.name ?? '';
+  const matches = useMemo(() => products
+    .map((product) => ({ product, score: scoreProduct(product, query) }))
+    .filter((item) => item.score > 0)
+    .sort((first, second) => second.score - first.score || first.product.name.localeCompare(second.product.name))
+    .slice(0, 12), [products, query]);
+
+  function selectProduct(product) {
+    onSelect(product);
+    setOpen(false);
+  }
+
+  return (
+    <div className="pb-product-combobox">
+      <div className="pb-product-search">
+        <Icon name="search" size={15} />
+        <input
+          disabled={disabled}
+          onBlur={() => window.setTimeout(() => setOpen(false), 140)}
+          onChange={(event) => {
+            onSelect(null, event.target.value);
+            setOpen(true);
+          }}
+          onFocus={() => setOpen(true)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && matches[0]?.product) {
+              event.preventDefault();
+              selectProduct(matches[0].product);
+            }
+            if (event.key === 'Escape') setOpen(false);
+          }}
+          placeholder={disabled ? 'Sélectionne une marque' : 'Rechercher nom, SKU, catégorie…'}
+          value={query}
+        />
+      </div>
+      {selectedProduct && (
+        <div className="pb-product-selected">
+          <span>{selectedProduct.category || 'Produit'}</span>
+          <strong>{selectedProduct.reference || 'Sans SKU'}</strong>
+          <em>{formatMoney(selectedProduct.unit_price_ht || 0)} HT</em>
+        </div>
+      )}
+      {open && !disabled && (
+        <div className="pb-product-menu">
+          {matches.map(({ product }) => (
+            <button key={product.id} onMouseDown={(event) => event.preventDefault()} onClick={() => selectProduct(product)} type="button">
+              <span className="pb-product-menu-main">
+                <strong>{product.name}</strong>
+                <small>{[product.reference, product.category].filter(Boolean).join(' · ') || 'Produit Naali'}</small>
+              </span>
+              <span className="pb-product-menu-price">{formatMoney(product.unit_price_ht || 0)}</span>
+            </button>
+          ))}
+          {!matches.length && <div className="pb-product-empty">Aucun produit trouvé.</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function OrdersView({ onCreateOrder, onGetCustomerContext, state }) {
+  const [composerOpen, setComposerOpen] = useState(false);
+  const [notice, setNotice] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [customerContext, setCustomerContext] = useState(null);
+  const [contextLoading, setContextLoading] = useState(false);
+  const [form, setForm] = useState({
+    pharmacyId: '',
+    brandId: '',
+    orderType: 'reassort',
+    status: 'draft',
+    orderDate: todayInputValue(),
+    totalHt: '',
+    discountRate: '0',
+    brandOrderReference: '',
+    notes: '',
+    items: [emptyOrderLine()],
+  });
   const revenue = state.orders.reduce((total, order) => total + Number(order.total_after_discount_ht || 0), 0);
   const lastOrder = state.orders[0];
+  const selectedPharmacy = state.pharmacies.find((pharmacy) => pharmacy.id === form.pharmacyId);
+  const selectedBrand = state.brands.find((brand) => brand.id === form.brandId);
+  const availableProducts = useMemo(() => state.products.filter((product) => product.brand_id === form.brandId), [form.brandId, state.products]);
+  const linePreviews = useMemo(() => form.items.map((item) => {
+    const product = state.products.find((candidate) => candidate.id === item.productId);
+    const unitPriceHt = Math.max(0, Number(item.unitPriceHt || product?.unit_price_ht || 0));
+    const quantity = Math.max(0, Number(item.quantity || 0));
+    return {
+      ...item,
+      product,
+      unitPriceHt,
+      quantity,
+      lineTotalHt: unitPriceHt * quantity,
+    };
+  }), [form.items, state.products]);
+  const preview = useMemo(() => {
+    const lineTotalHt = linePreviews.reduce((total, item) => total + item.lineTotalHt, 0);
+    const totalHt = lineTotalHt > 0 ? lineTotalHt : Math.max(0, Number(form.totalHt || 0));
+    const discountRate = Math.min(100, Math.max(0, Number(form.discountRate || 0)));
+    const discountAmount = totalHt * discountRate / 100;
+    const netHt = totalHt - discountAmount;
+    return {
+      totalHt,
+      discountAmount,
+      netHt,
+      totalTtc: netHt * 1.2,
+    };
+  }, [form.discountRate, form.totalHt, linePreviews]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadCustomerContext() {
+      if (!composerOpen || !form.pharmacyId || !form.brandId || !onGetCustomerContext) {
+        setCustomerContext(null);
+        return;
+      }
+      setContextLoading(true);
+      const context = await onGetCustomerContext({ pharmacyId: form.pharmacyId, brandId: form.brandId });
+      if (cancelled) return;
+      setContextLoading(false);
+      setCustomerContext(context);
+      if (!context?.error && context?.lastDiscountRate !== null && context?.lastDiscountRate !== undefined) {
+        setForm((currentForm) => {
+          if (Number(currentForm.discountRate || 0) > 0) return currentForm;
+          return { ...currentForm, discountRate: String(context.lastDiscountRate) };
+        });
+      }
+    }
+    loadCustomerContext();
+    return () => { cancelled = true; };
+  }, [composerOpen, form.brandId, form.pharmacyId, onGetCustomerContext]);
+
+  function updateLine(index, patch) {
+    setForm((currentForm) => ({
+      ...currentForm,
+      items: currentForm.items.map((item, itemIndex) => {
+        if (itemIndex !== index) return item;
+        const nextItem = { ...item, ...patch };
+        if (patch.productId) {
+          const product = state.products.find((candidate) => candidate.id === patch.productId);
+          nextItem.unitPriceHt = product?.unit_price_ht ? String(product.unit_price_ht) : '';
+          nextItem.productQuery = product?.name || '';
+        }
+        return nextItem;
+      }),
+    }));
+  }
+
+  function addLine() {
+    setForm((currentForm) => ({ ...currentForm, items: [...currentForm.items, emptyOrderLine()] }));
+  }
+
+  function removeLine(index) {
+    setForm((currentForm) => ({
+      ...currentForm,
+      items: currentForm.items.length === 1 ? [emptyOrderLine()] : currentForm.items.filter((_, itemIndex) => itemIndex !== index),
+    }));
+  }
+
+  async function submit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setNotice('');
+    const result = await onCreateOrder(form);
+    setSaving(false);
+    if (result.error) {
+      setNotice(result.error);
+      return;
+    }
+    setForm({
+      pharmacyId: '',
+      brandId: '',
+      orderType: 'reassort',
+      status: 'draft',
+      orderDate: todayInputValue(),
+      totalHt: '',
+      discountRate: '0',
+      brandOrderReference: '',
+      notes: '',
+      items: [emptyOrderLine()],
+    });
+    setCustomerContext(null);
+    setComposerOpen(false);
+    if (result.sync?.externalObjectId) {
+      setNotice('Commande créée dans PharmaBiz et deal HubSpot Naali créé.');
+    } else if (result.sync?.skipped) {
+      setNotice('Commande créée dans PharmaBiz. Aucun connecteur externe actif pour cette marque.');
+    } else if (result.syncWarning) {
+      setNotice(`Commande créée dans PharmaBiz. Sync externe à vérifier : ${result.syncWarning}`);
+    } else {
+      setNotice('Commande créée dans PharmaBiz.');
+    }
+  }
 
   return (
     <div className="pb-page">
       <section className="pb-page-heading">
         <div><span className="pb-eyebrow">Suivi commercial</span><h1>Commandes</h1><p>Retrouve les commandes suivies, leurs statuts et leur contribution au portefeuille.</p></div>
+        <button className="pb-button pb-button-primary" onClick={() => setComposerOpen((open) => !open)} type="button">
+          <Icon name="plus" size={17} />Nouvelle commande
+        </button>
       </section>
+
+      {notice && <div className="pb-inline-notice"><span>{notice}</span><button onClick={() => setNotice('')} type="button"><Icon name="close" size={15} /></button></div>}
+
+      {composerOpen && (
+        <form className="pb-activity-composer" onSubmit={submit}>
+          <div className="pb-composer-head">
+            <div><span className="pb-eyebrow">Saisie rapide</span><h2>Nouvelle commande</h2></div>
+            <button aria-label="Fermer" className="pb-icon-button" onClick={() => setComposerOpen(false)} type="button"><Icon name="close" size={17} /></button>
+          </div>
+          <div className="pb-order-composer-grid">
+            <label className="pb-field">
+              <span>Pharmacie</span>
+              <select autoFocus onChange={(event) => setForm({ ...form, pharmacyId: event.target.value })} required value={form.pharmacyId}>
+                <option value="">Sélectionner</option>
+                {state.pharmacies.map((pharmacy) => <option key={pharmacy.id} value={pharmacy.id}>{pharmacy.name}</option>)}
+              </select>
+            </label>
+            <label className="pb-field">
+              <span>Marque</span>
+              <select onChange={(event) => setForm({ ...form, brandId: event.target.value })} required value={form.brandId}>
+                <option value="">Sélectionner</option>
+                {state.brands.map((brand) => <option key={brand.id} value={brand.id}>{brand.name}</option>)}
+              </select>
+            </label>
+            <label className="pb-field">
+              <span>Type</span>
+              <select onChange={(event) => setForm({ ...form, orderType: event.target.value })} value={form.orderType}>
+                <option value="reassort">Réassort</option>
+                <option value="implantation">Implantation</option>
+                <option value="sample">Échantillon</option>
+                <option value="other">Autre</option>
+              </select>
+            </label>
+            <label className="pb-field">
+              <span>Statut</span>
+              <select onChange={(event) => setForm({ ...form, status: event.target.value })} value={form.status}>
+                <option value="draft">Brouillon</option>
+                <option value="sent_to_brand">Envoyée marque</option>
+                <option value="confirmed">Confirmée</option>
+                <option value="delivered">Livrée</option>
+              </select>
+            </label>
+            <label className="pb-field">
+              <span>Date</span>
+              <input onChange={(event) => setForm({ ...form, orderDate: event.target.value })} type="date" value={form.orderDate} />
+            </label>
+            <label className="pb-field">
+              <span>Remise %</span>
+              <input max="100" min="0" onChange={(event) => setForm({ ...form, discountRate: event.target.value })} step="0.01" type="number" value={form.discountRate} />
+            </label>
+            <label className="pb-field">
+              <span>Réf. marque</span>
+              <input onChange={(event) => setForm({ ...form, brandOrderReference: event.target.value })} placeholder="Optionnel" value={form.brandOrderReference} />
+            </label>
+          </div>
+          <div className="pb-order-context">
+            <Icon name="sparkles" size={17} />
+            {contextLoading ? (
+              <span>Recherche de l’historique client HubSpot…</span>
+            ) : customerContext?.error ? (
+              <span>Historique HubSpot indisponible : {customerContext.error}</span>
+            ) : customerContext?.lastDiscountRate !== null && customerContext?.lastDiscountRate !== undefined ? (
+              <span>Dernière remise appliquée : <strong>{customerContext.lastDiscountLabel || `${customerContext.lastDiscountRate}%`}</strong>{customerContext.lastDeal?.name ? ` · ${customerContext.lastDeal.name}` : ''}</span>
+            ) : form.pharmacyId && form.brandId ? (
+              <span>Aucune remise historique trouvée pour ce client.</span>
+            ) : (
+              <span>Sélectionne une pharmacie et Naali pour récupérer l’historique de remise.</span>
+            )}
+          </div>
+          <div className="pb-order-lines">
+            <div className="pb-order-lines-head">
+              <div><span className="pb-eyebrow">Catalogue</span><h3>Produits commandés</h3></div>
+              <button className="pb-button pb-button-secondary" onClick={addLine} type="button"><Icon name="plus" size={15} />Ajouter une ligne</button>
+            </div>
+            {form.items.map((item, index) => {
+              const selectedProduct = state.products.find((product) => product.id === item.productId);
+              const linePreview = linePreviews[index];
+              return (
+                <div className="pb-order-line" key={`${index}-${item.productId || 'empty'}`}>
+                  <label className="pb-field pb-product-field">
+                    <span>Produit</span>
+                    <ProductCombobox
+                      disabled={!availableProducts.length}
+                      onSelect={(product, query) => {
+                        if (product) updateLine(index, { productId: product.id, productQuery: product.name });
+                        else updateLine(index, { productId: '', productQuery: query });
+                      }}
+                      products={availableProducts}
+                      selectedProduct={selectedProduct}
+                      value={item.productQuery}
+                    />
+                  </label>
+                  <label className="pb-field">
+                    <span>Qté</span>
+                    <input min="0" onChange={(event) => updateLine(index, { quantity: event.target.value })} required step="1" type="number" value={item.quantity} />
+                  </label>
+                  <label className="pb-field">
+                    <span>Prix HT</span>
+                    <input min="0" onChange={(event) => updateLine(index, { unitPriceHt: event.target.value })} required step="0.01" type="number" value={item.unitPriceHt} />
+                  </label>
+                  <div className="pb-order-line-total">
+                    <span>{selectedProduct?.category || 'Ligne'}</span>
+                    <strong>{formatMoney(linePreview?.lineTotalHt || 0)}</strong>
+                  </div>
+                  <button aria-label="Retirer la ligne" className="pb-icon-button" onClick={() => removeLine(index)} type="button"><Icon name="close" size={15} /></button>
+                </div>
+              );
+            })}
+          </div>
+          {!availableProducts.length && form.brandId && (
+            <div className="pb-inline-notice">
+              <span>Catalogue vide pour cette marque. Lance une synchronisation HubSpot pour charger les produits Naali.</span>
+            </div>
+          )}
+          <label className="pb-field">
+            <span>Notes</span>
+            <textarea onChange={(event) => setForm({ ...form, notes: event.target.value })} placeholder="Conditions, livraison, détails utiles…" rows="2" value={form.notes} />
+          </label>
+          <div className="pb-order-preview">
+            <span>{selectedPharmacy?.name || 'Pharmacie'} · {selectedBrand?.name || 'Marque'}</span>
+            <strong>{formatMoney(preview.totalHt)} HT brut · -{formatMoney(preview.discountAmount)} · {formatMoney(preview.netHt)} HT net</strong>
+          </div>
+          <div className="pb-composer-actions">
+            <button className="pb-button pb-button-secondary" onClick={() => setComposerOpen(false)} type="button">Annuler</button>
+            <button className="pb-button pb-button-primary" disabled={saving} type="submit">{saving ? 'Création…' : 'Créer la commande'}</button>
+          </div>
+        </form>
+      )}
+
       <section className="pb-inline-metrics">
         <div><span>CA suivi</span><strong>{formatMoney(revenue)}</strong></div>
         <div><span>Commandes</span><strong>{state.orders.length}</strong></div>
@@ -67,7 +425,7 @@ export function CommissionsView({ state }) {
             <tbody>{state.commissions.map((commission) => (
               <tr key={commission.id}>
                 <td><strong>{commission.brands?.name || '—'}</strong></td>
-                <td>{commission.pharmacies?.name || '—'}</td>
+                <td>{commission.orders?.pharmacies?.name || '—'}</td>
                 <td>{commission.orders?.order_number || '—'}</td>
                 <td><strong>{formatMoney(commission.amount_ht)}</strong></td>
                 <td><span className={'pb-status pb-commission-' + commission.status}>{formatLabel(commission.status)}</span></td>

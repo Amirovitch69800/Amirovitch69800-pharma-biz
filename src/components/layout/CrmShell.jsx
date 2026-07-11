@@ -101,6 +101,14 @@ export default function CrmShell({
             <span>Centre d’attention</span>
           </button>
           <button
+            className={activeTab === 'integrations' ? 'pb-assistant-link is-active' : 'pb-assistant-link'}
+            onClick={() => onTabChange('integrations')}
+            type="button"
+          >
+            <Icon name="link" size={17} />
+            <span>Intégrations</span>
+          </button>
+          <button
             className={activeTab === 'settings' ? 'pb-settings-link is-active' : 'pb-settings-link'}
             onClick={() => onTabChange('settings')}
             type="button"

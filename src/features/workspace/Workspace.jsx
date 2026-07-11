@@ -7,7 +7,6 @@ import ActivitiesView from '../activities/ActivitiesView.jsx';
 import Dashboard from '../dashboard/Dashboard.jsx';
 import IntegrationsView from '../integrations/IntegrationsView.jsx';
 import PipelineView from '../pipeline/PipelineView.jsx';
-import BrandPortal from '../../BrandPortal.jsx';
 import FieldMissions from '../../FieldMissions.jsx';
 import {
   AttentionCenterView,
@@ -42,7 +41,6 @@ export default function Workspace({ session }) {
 
   let content;
   if (activeTab === 'dashboard') content = <Dashboard onCompleteTask={completeTask} onNavigate={setActiveTab} onOpenAccount={openAccount} state={state} />;
-  else if (activeTab === 'brand-space') content = <BrandPortal state={state} />;
   else if (activeTab === 'accounts') content = <AccountsView onAddRelation={addRelation} onCreateTask={createTask} onSelectAccount={selectAccount} onUpdateRelation={updateRelation} selectedAccountId={selectedAccountId} state={state} />;
   else if (activeTab === 'pipeline') content = <PipelineView onOpenAccount={openAccount} state={state} />;
   else if (activeTab === 'activities') content = <ActivitiesView composerKey={composerKey} onCompleteTask={completeTask} onCreateTask={createTask} state={state} />;

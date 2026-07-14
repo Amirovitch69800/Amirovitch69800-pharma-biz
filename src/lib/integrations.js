@@ -7,9 +7,9 @@ export const integrationCatalog = [
     category: 'CRM',
     icon: 'database',
     statusLabel: 'App privée',
-    description: 'Importe les sociétés assignées, le catalogue produits Naali et prépare la création de deals.',
-    scopes: ['crm.objects.companies.read', 'crm.objects.products.read', 'crm.objects.deals.write'],
-    inbound: ['Companies', 'Catalogue produits', 'Historique remises'],
+    description: 'Importe le portefeuille Naali, le catalogue, les deals historiques et les lignes produits.',
+    scopes: ['crm.objects.companies.read', 'crm.objects.products.read', 'crm.objects.deals.read', 'crm.objects.line_items.read', 'crm.objects.deals.write'],
+    inbound: ['Companies clientes', 'Catalogue produits', 'Deals historiques', 'Line items', 'Remises'],
     outbound: ['Deals', 'Line items', 'Journal de sync'],
     cadence: 'Sync manuelle sécurisée',
   },
@@ -31,10 +31,10 @@ export const integrationCatalog = [
     category: 'Email & agenda',
     icon: 'calendar',
     statusLabel: 'Extension',
-    description: 'Prépare Gmail et Google Calendar pour les équipes hors Microsoft.',
-    scopes: ['gmail.readonly', 'calendar.events', 'contacts.readonly'],
-    inbound: ['Emails', 'Événements', 'Contacts'],
-    outbound: ['Rendez-vous', 'Comptes associés'],
+    description: 'Connecte Google Calendar pour afficher les vrais rendez-vous terrain dans l’espace agent.',
+    scopes: ['calendar.events'],
+    inbound: ['Événements agenda'],
+    outbound: ['Rendez-vous terrain'],
     cadence: 'Sur demande',
   },
 ];
@@ -51,7 +51,8 @@ export async function startIntegrationOAuth(provider) {
     },
   });
 
-  if (error) return { error: error.message };
+  if (data?.error) return { error: data.error };
+  if (error) return { error: await readFunctionError(error) };
   if (!data?.authorizationUrl) return { error: 'Connecteur OAuth non configuré côté backend.' };
 
   window.location.href = data.authorizationUrl;
@@ -65,18 +66,82 @@ export async function syncHubSpotPrivateApp() {
     },
   });
 
-  if (error) return { error: error.message };
   if (data?.error) return { error: data.error };
+  if (error) return { error: await readFunctionError(error) };
 
-  const { data: catalogData, error: catalogError } = await supabase.functions.invoke('hubspot-catalog-sync', {
+  return { data, error: null };
+}
+
+export async function syncHubSpotLineItems() {
+  const { data, error } = await supabase.functions.invoke('hubspot-line-items-sync', {
     body: {
-      mode: 'private_app_token',
+      limit: 50,
+      force: false,
     },
   });
 
-  if (catalogError) return { error: catalogError.message };
-  if (catalogData?.error) return { error: catalogData.error };
-  return { data: { ...data, catalog: catalogData }, error: null };
+  if (data?.error) return { error: data.error };
+  if (error) return { error: await readFunctionError(error) };
+
+  return { data, error: null };
+}
+
+export async function geocodeAgentPharmacies() {
+  const { data, error } = await supabase.functions.invoke('geocode-pharmacies', {
+    body: {
+      limit: 55,
+      force: false,
+    },
+  });
+
+  if (data?.error) return { error: data.error };
+  if (error) return { error: await readFunctionError(error) };
+
+  return { data, error: null };
+}
+
+export async function syncGoogleCalendar() {
+  const { data, error } = await supabase.functions.invoke('google-calendar-sync', {
+    body: {
+      daysAhead: 14,
+    },
+  });
+
+  if (data?.error) return { error: data.error };
+  if (error) return { error: await readFunctionError(error) };
+
+  return { data, error: null };
+}
+
+export async function createGoogleCalendarEvent({ activityId, durationMinutes }) {
+  const { data, error } = await supabase.functions.invoke('google-calendar-create-event', {
+    body: {
+      activityId,
+      durationMinutes,
+    },
+  });
+
+  if (data?.error) return { error: data.error };
+  if (error) return { error: await readFunctionError(error) };
+
+  return { data, error: null };
+}
+
+async function readFunctionError(error) {
+  try {
+    const response = error?.context;
+    if (response?.json) {
+      const body = await response.clone().json();
+      if (body?.error) return body.error;
+    }
+    if (response?.text) {
+      const text = await response.clone().text();
+      if (text) return text;
+    }
+  } catch {
+    // Keep the original Supabase error when the response body cannot be read.
+  }
+  return error?.message || 'Erreur Edge Function.';
 }
 
 export async function connectIntegration(provider) {

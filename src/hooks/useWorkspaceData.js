@@ -9,13 +9,20 @@ const emptyState = {
   pharmacies: [],
   relations: [],
   orders: [],
+  orderItems: [],
   commissions: [],
   followUps: [],
   appointments: [],
   whatsappMessages: [],
   aiActions: [],
   integrations: [],
+  brandIntegrations: [],
   integrationsReady: true,
+  brandUsers: [],
+  brandRequests: [],
+  campaigns: [],
+  missions: [],
+  workflowReady: true,
 };
 
 export function useWorkspaceData(session) {
@@ -38,33 +45,57 @@ export function useWorkspaceData(session) {
       supabase.from('pharmacies').select('*').neq('hubspot_sync_status', 'out_of_scope').order('name'),
       supabase.from('pharmacy_brand_relations').select('*, brands(name), pharmacies(name, city)').order('updated_at', { ascending: false }),
       supabase.from('v_orders_summary').select('*').order('created_at', { ascending: false }),
+      supabase.from('order_items').select('*, orders(id, brand_id, pharmacy_id, status, order_type, order_date, created_at), products(name, category)').order('created_at', { ascending: false }),
       supabase.from('commissions').select('*, brands(name), orders(order_number, pharmacies(name))').order('created_at', { ascending: false }),
       supabase.from('follow_up_tasks').select('*, pharmacies(name), brands(name)').order('due_at', { ascending: true }),
       supabase.from('appointment_requests').select('*, pharmacies(name), brands(name)').order('created_at', { ascending: false }),
       supabase.from('whatsapp_messages').select('*').order('created_at', { ascending: false }).limit(20),
       supabase.from('ai_actions').select('*, pharmacies(name), brands(name)').order('created_at', { ascending: false }).limit(20),
       supabase.from('integration_connections').select('*').eq('user_id', userId).order('updated_at', { ascending: false }),
+      supabase.from('brand_users').select('brand_id, role').eq('user_id', userId),
+      supabase.from('brand_requests').select('*, brands(name)').order('created_at', { ascending: false }),
+      supabase.from('campaigns').select('*, brands(name), brand_requests(objective, request_type)').order('created_at', { ascending: false }),
+      supabase.from('field_missions').select('*, field_animators(full_name), pharmacies(name,city), brands(name)').order('starts_at', { ascending: false }),
+      supabase.from('brand_integrations').select('*').order('updated_at', { ascending: false }),
     ]);
 
-    const integrationTableMissing = calls[12].error?.code === '42P01';
+    const orderItemsTableMissing = calls[7].error?.code === '42P01';
+    const integrationTableMissing = calls[13].error?.code === '42P01';
+    const brandUserTableMissing = calls[14].error?.code === '42P01';
+    const workflowTableMissing = [calls[15], calls[16], calls[17]].some((result) => result.error?.code === '42P01');
+    const brandIntegrationTableMissing = calls[18].error?.code === '42P01';
     const errors = calls
-      .map((result, index) => (index === 12 && integrationTableMissing ? null : result.error))
+      .map((result, index) => ((index === 7 && orderItemsTableMissing) || (index === 13 && integrationTableMissing) || (index === 14 && brandUserTableMissing) || (index >= 15 && index <= 17 && workflowTableMissing) || (index === 18 && brandIntegrationTableMissing) ? null : result.error))
       .filter(Boolean);
+    const profile = calls[0].data;
+    const brandUsers = brandUserTableMissing ? [] : calls[14].data || [];
+    const isBrandProfile = profile?.role === 'brand';
+    const allowedBrandIds = new Set(brandUsers.map((item) => item.brand_id));
+    const onlyAllowedBrands = (items) => (
+      isBrandProfile ? (items || []).filter((item) => allowedBrandIds.has(item.brand_id || item.id)) : items || []
+    );
     setState({
-      profile: calls[0].data,
+      profile,
       agent: calls[1].data,
-      brands: calls[2].data || [],
-      products: calls[3].data || [],
+      brands: onlyAllowedBrands(calls[2].data),
+      products: onlyAllowedBrands(calls[3].data),
       pharmacies: calls[4].data || [],
-      relations: calls[5].data || [],
-      orders: calls[6].data || [],
-      commissions: calls[7].data || [],
-      followUps: calls[8].data || [],
-      appointments: calls[9].data || [],
-      whatsappMessages: calls[10].data || [],
-      aiActions: calls[11].data || [],
-      integrations: integrationTableMissing ? [] : calls[12].data || [],
+      relations: onlyAllowedBrands(calls[5].data),
+      orders: onlyAllowedBrands(calls[6].data),
+      orderItems: orderItemsTableMissing ? [] : onlyAllowedBrands((calls[7].data || []).map((item) => ({ ...item, brand_id: item.orders?.brand_id, pharmacy_id: item.orders?.pharmacy_id }))),
+      commissions: onlyAllowedBrands(calls[8].data),
+      followUps: calls[9].data || [],
+      appointments: calls[10].data || [],
+      whatsappMessages: calls[11].data || [],
+      aiActions: calls[12].data || [],
+      integrations: integrationTableMissing ? [] : calls[13].data || [],
+      brandIntegrations: brandIntegrationTableMissing ? [] : onlyAllowedBrands(calls[18].data),
       integrationsReady: !integrationTableMissing,
+      brandUsers,
+      brandRequests: workflowTableMissing ? [] : onlyAllowedBrands(calls[15].data),
+      campaigns: workflowTableMissing ? [] : onlyAllowedBrands(calls[16].data),
+      missions: workflowTableMissing ? [] : onlyAllowedBrands(calls[17].data),
+      workflowReady: !workflowTableMissing,
     });
     setError(errors.map((item) => item.message).join(' · '));
     setLastSyncedAt(new Date());
@@ -220,6 +251,26 @@ export function useWorkspaceData(session) {
     return data || { error: null };
   }, []);
 
+  const createBrandRequest = useCallback(async (request) => {
+    if (!request.brandId) return { error: 'Sélectionne une marque.' };
+
+    const { error: insertError } = await supabase.from('brand_requests').insert({
+      brand_id: request.brandId,
+      request_type: request.requestType,
+      objective: request.objective,
+      zone: request.zone || null,
+      desired_date: request.desiredDate || null,
+      budget_ht: request.budgetHt ? Number(request.budgetHt) : null,
+      brief: request.brief || null,
+      status: 'submitted',
+      created_by: state.profile?.id || null,
+    });
+
+    if (insertError) return { error: insertError.message };
+    await load();
+    return { error: null };
+  }, [load, state.profile?.id]);
+
   return {
     state,
     loading,
@@ -233,5 +284,6 @@ export function useWorkspaceData(session) {
     addRelation,
     createOrder,
     getOrderCustomerContext,
+    createBrandRequest,
   };
 }

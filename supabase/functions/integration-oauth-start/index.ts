@@ -17,7 +17,7 @@ const providers = {
   google: {
     authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
     clientIdEnv: 'GOOGLE_CLIENT_ID',
-    scopes: ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/contacts.readonly'],
+    scopes: ['https://www.googleapis.com/auth/calendar.events'],
   },
 };
 
@@ -85,7 +85,11 @@ Deno.serve(async (request) => {
   const clientId = Deno.env.get(config.clientIdEnv);
   const callbackUrl = Deno.env.get('INTEGRATION_OAUTH_CALLBACK_URL');
   if (!clientId || !callbackUrl) {
-    return Response.json({ error: 'OAuth provider is not configured yet.' }, { status: 412, headers: corsHeaders });
+    const missing = [
+      !clientId ? config.clientIdEnv : null,
+      !callbackUrl ? 'INTEGRATION_OAUTH_CALLBACK_URL' : null,
+    ].filter(Boolean).join(', ');
+    return Response.json({ error: `OAuth ${provider} non configuré : variable(s) manquante(s) ${missing}.` }, { status: 412, headers: corsHeaders });
   }
 
   const state = await persistOAuthState(userId, provider, redirectTo || 'https://pharma-biz.vercel.app');
@@ -95,7 +99,11 @@ Deno.serve(async (request) => {
   url.searchParams.set('response_type', 'code');
   url.searchParams.set('scope', config.scopes.join(' '));
   url.searchParams.set('state', state);
-  if (provider === 'google') url.searchParams.set('access_type', 'offline');
+  if (provider === 'google') {
+    url.searchParams.set('access_type', 'offline');
+    url.searchParams.set('prompt', 'consent');
+    url.searchParams.set('include_granted_scopes', 'true');
+  }
 
   return Response.json({ authorizationUrl: url.toString(), state }, { headers: corsHeaders });
 });

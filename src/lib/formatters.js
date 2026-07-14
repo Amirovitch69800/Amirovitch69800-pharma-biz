@@ -22,6 +22,13 @@ const moneyFormatter = new Intl.NumberFormat('fr-FR', {
   maximumFractionDigits: 0,
 });
 
+const preciseMoneyFormatter = new Intl.NumberFormat('fr-FR', {
+  style: 'currency',
+  currency: 'EUR',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
 const statusLabels = {
   prospect: 'Prospect',
   contacted: 'Contactée',
@@ -43,6 +50,10 @@ const statusLabels = {
 
 export function formatMoney(value) {
   return moneyFormatter.format(Number(value || 0));
+}
+
+export function formatPreciseMoney(value) {
+  return preciseMoneyFormatter.format(Number(value || 0));
 }
 
 export function formatDate(value) {

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import Icon from '../../components/ui/Icon.jsx';
-import { formatDate, formatDateTime, formatLabel, formatMoney } from '../../lib/formatters.js';
+import { formatDate, formatDateTime, formatLabel, formatMoney, formatPreciseMoney } from '../../lib/formatters.js';
 
 function EmptyState({ icon, message, title }) {
   return <div className="pb-empty-state"><Icon name={icon} size={24} /><strong>{title}</strong><span>{message}</span></div>;
@@ -81,7 +81,7 @@ function ProductCombobox({ disabled, onSelect, products, selectedProduct, value 
         <div className="pb-product-selected">
           <span>{selectedProduct.category || 'Produit'}</span>
           <strong>{selectedProduct.reference || 'Sans SKU'}</strong>
-          <em>{formatMoney(selectedProduct.unit_price_ht || 0)} HT</em>
+          <em>{formatPreciseMoney(selectedProduct.unit_price_ht || 0)} HT</em>
         </div>
       )}
       {open && !disabled && (
@@ -92,7 +92,7 @@ function ProductCombobox({ disabled, onSelect, products, selectedProduct, value 
                 <strong>{product.name}</strong>
                 <small>{[product.reference, product.category].filter(Boolean).join(' · ') || 'Produit Naali'}</small>
               </span>
-              <span className="pb-product-menu-price">{formatMoney(product.unit_price_ht || 0)}</span>
+              <span className="pb-product-menu-price">{formatPreciseMoney(product.unit_price_ht || 0)}</span>
             </button>
           ))}
           {!matches.length && <div className="pb-product-empty">Aucun produit trouvé.</div>}
@@ -346,7 +346,7 @@ export function OrdersView({ onCreateOrder, onGetCustomerContext, state }) {
                   </label>
                   <div className="pb-order-line-total">
                     <span>{selectedProduct?.category || 'Ligne'}</span>
-                    <strong>{formatMoney(linePreview?.lineTotalHt || 0)}</strong>
+                    <strong>{formatPreciseMoney(linePreview?.lineTotalHt || 0)}</strong>
                   </div>
                   <button aria-label="Retirer la ligne" className="pb-icon-button" onClick={() => removeLine(index)} type="button"><Icon name="close" size={15} /></button>
                 </div>
@@ -364,7 +364,7 @@ export function OrdersView({ onCreateOrder, onGetCustomerContext, state }) {
           </label>
           <div className="pb-order-preview">
             <span>{selectedPharmacy?.name || 'Pharmacie'} · {selectedBrand?.name || 'Marque'}</span>
-            <strong>{formatMoney(preview.totalHt)} HT brut · -{formatMoney(preview.discountAmount)} · {formatMoney(preview.netHt)} HT net</strong>
+            <strong>{formatPreciseMoney(preview.totalHt)} HT brut · -{formatPreciseMoney(preview.discountAmount)} · {formatPreciseMoney(preview.netHt)} HT net</strong>
           </div>
           <div className="pb-composer-actions">
             <button className="pb-button pb-button-secondary" onClick={() => setComposerOpen(false)} type="button">Annuler</button>

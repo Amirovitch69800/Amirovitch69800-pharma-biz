@@ -1,30 +1,24 @@
 import React from 'react';
 import BrandPortal from '../../BrandPortal.jsx';
-import Icon from '../../components/ui/Icon.jsx';
 import { useWorkspaceData } from '../../hooks/useWorkspaceData.js';
 import { supabase } from '../../lib/supabase.js';
 
-export default function BrandWorkspace({ session }) {
-  const { error, lastSyncedAt, loading, reload, state } = useWorkspaceData(session);
+function LoadingWorkspace() {
+  return <main className="pb-boot"><div className="pb-boot-mark">PB</div><strong>Préparation de l’espace marque…</strong><span>Chargement des demandes et performances.</span></main>;
+}
 
-  if (loading && !lastSyncedAt) {
-    return <main className="pb-boot"><div className="pb-boot-mark">PB</div><strong>Préparation de votre espace marque…</strong><span>Synchronisation de votre activité.</span></main>;
-  }
+export default function BrandWorkspace({ session }) {
+  const { createBrandRequest, lastSyncedAt, loading, state } = useWorkspaceData(session);
+
+  if (loading && !lastSyncedAt) return <LoadingWorkspace />;
 
   return (
-    <main className="bp-workspace">
-      <header className="bp-workspace-topbar">
-        <div className="bp-workspace-brand"><span className="pb-brand-mark">PB</span><span><strong>PharmaBiz</strong><small>Espace marque</small></span></div>
-        <div className="bp-workspace-actions">
-          <button aria-label="Actualiser" className="pb-icon-button" onClick={reload} type="button"><Icon name="refresh" size={18} /></button>
-          <span>{session.user.email}</span>
-          <button className="pb-button pb-button-secondary" onClick={() => supabase.auth.signOut()} type="button">Se déconnecter</button>
-        </div>
+    <main className="pb-role-workspace">
+      <header className="pb-role-topbar">
+        <button className="pb-brand" type="button"><span className="pb-brand-mark">PB</span><span><strong>PharmaBiz</strong><small>Espace marque</small></span></button>
+        <button className="pb-button pb-button-secondary" onClick={() => supabase.auth.signOut()} type="button">Se déconnecter</button>
       </header>
-      <div className="bp-workspace-content">
-        {error && <div className="pb-alert" role="alert"><span>{error}</span></div>}
-        <BrandPortal session={session} state={state} />
-      </div>
+      <BrandPortal onCreateRequest={createBrandRequest} state={state} />
     </main>
   );
 }

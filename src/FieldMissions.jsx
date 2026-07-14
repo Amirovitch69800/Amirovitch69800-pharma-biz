@@ -42,7 +42,7 @@ const initialMissionForm = {
   brief: '',
 };
 
-export default function FieldMissions({ state }) {
+export default function FieldMissions({ canManage = true, state, title = 'Réseau terrain' }) {
   const [animators, setAnimators] = useState([]);
   const [missions, setMissions] = useState([]);
   const [tab, setTab] = useState('missions');
@@ -174,6 +174,7 @@ export default function FieldMissions({ state }) {
     .sort((a, b) => new Date(a.starts_at) - new Date(b.starts_at)), [missions]);
 
   const actionLabel = tab === 'animators' ? 'Ajouter un animateur' : 'Nouvelle mission';
+  const visibleTabs = canManage ? TABS : TABS.filter(([key]) => key !== 'animators');
   const onPrimaryAction = tab === 'animators'
     ? () => setAnimatorDrawerOpen(true)
     : () => setMissionDrawerOpen(true);
@@ -183,26 +184,26 @@ export default function FieldMissions({ state }) {
       <header className="fm-page-head">
         <div>
           <span className="fm-eyebrow">Opérations terrain</span>
-          <h1>Réseau terrain</h1>
-          <p>Pilote les animateurs, missions, résultats et coûts depuis un seul espace.</p>
+          <h1>{title}</h1>
+          <p>{canManage ? 'Pilote les animateurs, missions, résultats et coûts depuis un seul espace.' : 'Consulte les missions proposées, accepte-les et transmets tes comptes rendus terrain.'}</p>
         </div>
         <div className="fm-head-actions">
           <button className="fm-button fm-button-secondary" onClick={load} type="button">Actualiser</button>
-          <button className="fm-button fm-button-primary" onClick={onPrimaryAction} type="button">+ {actionLabel}</button>
+          {canManage && <button className="fm-button fm-button-primary" onClick={onPrimaryAction} type="button">+ {actionLabel}</button>}
         </div>
       </header>
 
       {notice && <div className="fm-alert">{notice}</div>}
 
       <section className="fm-stats" aria-label="Indicateurs réseau terrain">
-        <StatCard label="Animateurs actifs" value={stats.activeAnimators} meta="réseau disponible" />
+        {canManage && <StatCard label="Animateurs actifs" value={stats.activeAnimators} meta="réseau disponible" />}
         <StatCard label="Missions planifiées" value={stats.upcoming} meta="affectées ou acceptées" />
         <StatCard label="Missions réalisées" value={stats.completed} meta={`${stats.units} ventes déclarées`} />
         <StatCard label="CA sell-out" value={money(stats.revenue)} meta={`${money(stats.fees)} à payer`} />
       </section>
 
       <div className="fm-tabs" role="tablist" aria-label="Vues réseau terrain">
-        {TABS.map(([key, label]) => (
+        {visibleTabs.map(([key, label]) => (
           <button
             className={tab === key ? 'is-active' : ''}
             key={key}
@@ -239,15 +240,15 @@ export default function FieldMissions({ state }) {
               {filteredMissions.length ? (
                 <div className="fm-mission-list">
                   {filteredMissions.map((mission) => (
-                    <MissionCard key={mission.id} mission={mission} onReport={saveReport} onStatus={setStatus} />
+                    <MissionCard canManage={canManage} key={mission.id} mission={mission} onReport={saveReport} onStatus={setStatus} />
                   ))}
                 </div>
               ) : (
                 <EmptyState
                   title="Aucune mission à afficher"
                   text="Crée une mission d’animation, de formation ou de merchandising et affecte-la à ton réseau."
-                  action="Créer une mission"
-                  onAction={() => setMissionDrawerOpen(true)}
+                  action={canManage ? 'Créer une mission' : undefined}
+                  onAction={canManage ? () => setMissionDrawerOpen(true) : undefined}
                 />
               )}
             </section>
@@ -335,7 +336,7 @@ export default function FieldMissions({ state }) {
         </>
       )}
 
-      {missionDrawerOpen && (
+      {canManage && missionDrawerOpen && (
         <Drawer title="Créer une mission" onClose={() => setMissionDrawerOpen(false)}>
           <form className="fm-drawer-form" onSubmit={createMission}>
             <Field label="Titre de la mission"><input required value={missionForm.title} onChange={(event) => setMissionForm({ ...missionForm, title: event.target.value })} /></Field>
@@ -355,7 +356,7 @@ export default function FieldMissions({ state }) {
         </Drawer>
       )}
 
-      {animatorDrawerOpen && (
+      {canManage && animatorDrawerOpen && (
         <Drawer title="Ajouter un animateur" onClose={() => setAnimatorDrawerOpen(false)}>
           <form className="fm-drawer-form" onSubmit={createAnimator}>
             <Field label="Nom complet"><input required value={animatorForm.full_name} onChange={(event) => setAnimatorForm({ ...animatorForm, full_name: event.target.value })} /></Field>
@@ -387,7 +388,7 @@ function Field({ label, children }) {
   return <label className="fm-field"><span>{label}</span>{children}</label>;
 }
 
-function MissionCard({ mission, onStatus, onReport }) {
+function MissionCard({ canManage = true, mission, onStatus, onReport }) {
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({
     units_sold: mission.units_sold || '',
@@ -421,9 +422,9 @@ function MissionCard({ mission, onStatus, onReport }) {
         </div>
       ) : mission.report ? <p className="fm-report-text">{mission.report}</p> : null}
       <footer>
-        {['assigned', 'accepted'].includes(mission.status) && <button className="fm-button fm-button-secondary" onClick={() => setEditing(true)} type="button">Saisir les résultats</button>}
-        {mission.status === 'assigned' && <button className="fm-button fm-button-secondary" onClick={() => onStatus(mission.id, 'accepted')} type="button">Marquer acceptée</button>}
-        {mission.status === 'completed' && <button className="fm-button fm-button-primary" onClick={() => onStatus(mission.id, 'validated')} type="button">Valider la mission</button>}
+        {['proposed', 'assigned', 'accepted'].includes(mission.status) && <button className="fm-button fm-button-secondary" onClick={() => setEditing(true)} type="button">Saisir les résultats</button>}
+        {['proposed', 'assigned'].includes(mission.status) && <button className="fm-button fm-button-secondary" onClick={() => onStatus(mission.id, 'accepted')} type="button">Accepter</button>}
+        {canManage && mission.status === 'completed' && <button className="fm-button fm-button-primary" onClick={() => onStatus(mission.id, 'validated')} type="button">Valider la mission</button>}
       </footer>
     </article>
   );

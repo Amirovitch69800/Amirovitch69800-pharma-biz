@@ -6,3 +6,8 @@ dist
 .vercel
 .supabase-home
 supabase/.temp
+
+# Prototypes locaux temporaires — référence produit/design dans /docs
+agent-local.html
+audit-v3.html
+refonte-local.html

@@ -2,29 +2,46 @@ import React, { useEffect, useState } from 'react';
 import Icon from '../ui/Icon.jsx';
 import { formatDateTime, initials } from '../../lib/formatters.js';
 
-const navigation = [
+const defaultNavigation = [
   {
-    label: 'Pilotage',
+    label: 'Terrain',
     items: [
-      ['dashboard', 'Vue d’ensemble', 'home'],
-      ['operations', 'Flux opérationnel', 'board'],
-      ['accounts', 'Comptes', 'building'],
+      ['dashboard', 'Aujourd’hui', 'home'],
+      ['accounts', 'Pharmacies', 'building'],
       ['pipeline', 'Pipeline', 'board'],
-      ['activities', 'Activités', 'check'],
+      ['activities', 'Agenda & actions', 'calendar'],
     ],
   },
   {
     label: 'Business',
     items: [
       ['orders', 'Commandes', 'bag'],
+      ['field-network', 'Mes missions', 'check'],
+      ['brands', 'Mes marques', 'sparkles'],
       ['commissions', 'Commissions', 'chart'],
-      ['brands', 'Marques', 'sparkles'],
-      ['field-network', 'Réseau terrain', 'building'],
     ],
   },
 ];
 
-export default function CrmShell({ activeTab, children, error, lastSyncedAt, onClearError, onCreateActivity, onOpenAccount, onReload, onSignOut, onTabChange, profile, search, searchResults, setSearch, session }) {
+export default function CrmShell({
+  activeTab,
+  children,
+  error,
+  lastSyncedAt,
+  navigation = defaultNavigation,
+  onClearError,
+  onCreateActivity,
+  onOpenAccount,
+  onReload,
+  onSignOut,
+  onTabChange,
+  profile,
+  search,
+  searchResults,
+  setSearch,
+  session,
+  workspaceLabel = 'Field CRM',
+}) {
   const [quickMenuOpen, setQuickMenuOpen] = useState(false);
 
   useEffect(() => {
@@ -44,7 +61,7 @@ export default function CrmShell({ activeTab, children, error, lastSyncedAt, onC
   return (
     <main className="pb-shell">
       <aside className="pb-sidebar">
-        <button className="pb-brand" onClick={() => onTabChange('dashboard')} type="button"><span className="pb-brand-mark">PB</span><span><strong>PharmaBiz</strong><small>Field CRM</small></span></button>
+        <button className="pb-brand" onClick={() => onTabChange('dashboard')} type="button"><span className="pb-brand-mark">PB</span><span><strong>PharmaBiz</strong><small>{workspaceLabel}</small></span></button>
         <nav className="pb-navigation" aria-label="Navigation principale">
           {navigation.map((group) => <div className="pb-nav-group" key={group.label}><span className="pb-nav-label">{group.label}</span>{group.items.map(([key, label, icon]) => <button aria-current={activeTab === key ? 'page' : undefined} className={activeTab === key ? 'is-active' : ''} key={key} onClick={() => onTabChange(key)} type="button"><Icon name={icon} size={17} /><span>{label}</span></button>)}</div>)}
         </nav>
@@ -58,7 +75,7 @@ export default function CrmShell({ activeTab, children, error, lastSyncedAt, onC
       <section className="pb-main">
         <header className="pb-topbar">
           <div className="pb-global-search"><Icon name="search" size={18} /><input autoComplete="off" id="pb-global-search" onChange={(event) => setSearch(event.target.value)} placeholder="Rechercher une pharmacie…" value={search} /><kbd>⌘ K</kbd>{search && <div className="pb-search-results">{searchResults.length ? searchResults.map((account) => <button key={account.id} onClick={() => selectAccount(account)} type="button"><span className="pb-result-avatar">{initials(account.name)}</span><span><strong>{account.name}</strong><small>{[account.postal_code, account.city].filter(Boolean).join(' ') || 'Localisation à compléter'}</small></span><Icon name="chevron" size={16} /></button>) : <div className="pb-no-result">Aucun compte trouvé.</div>}</div>}</div>
-          <div className="pb-topbar-actions"><button aria-label="Rafraîchir les données" className="pb-icon-button" onClick={onReload} type="button"><Icon name="refresh" size={18} /></button><div className="pb-create-wrap"><button className="pb-button pb-button-primary" onClick={() => setQuickMenuOpen((open) => !open)} type="button"><Icon name="plus" size={17} /><span>Créer</span></button>{quickMenuOpen && <div className="pb-quick-menu"><button onClick={() => { setQuickMenuOpen(false); onCreateActivity(); }} type="button"><Icon name="check" size={16} /><span><strong>Nouvelle activité</strong><small>Planifier une action terrain</small></span></button><button onClick={() => { setQuickMenuOpen(false); onTabChange('operations'); }} type="button"><Icon name="board" size={16} /><span><strong>Ouvrir le flux opérationnel</strong><small>Qualifier une demande marque</small></span></button><button onClick={() => { setQuickMenuOpen(false); onTabChange('accounts'); }} type="button"><Icon name="building" size={16} /><span><strong>Explorer les comptes</strong><small>Ouvrir le portefeuille pharmacie</small></span></button></div>}</div></div>
+          <div className="pb-topbar-actions"><button aria-label="Rafraîchir les données" className="pb-icon-button" onClick={onReload} type="button"><Icon name="refresh" size={18} /></button><div className="pb-create-wrap"><button className="pb-button pb-button-primary" onClick={() => setQuickMenuOpen((open) => !open)} type="button"><Icon name="plus" size={17} /><span>Créer</span></button>{quickMenuOpen && <div className="pb-quick-menu"><button onClick={() => { setQuickMenuOpen(false); onCreateActivity(); }} type="button"><Icon name="check" size={16} /><span><strong>Nouvelle activité</strong><small>Planifier une action terrain</small></span></button><button onClick={() => { setQuickMenuOpen(false); onTabChange('accounts'); }} type="button"><Icon name="building" size={16} /><span><strong>Explorer les comptes</strong><small>Ouvrir le portefeuille pharmacie</small></span></button></div>}</div></div>
         </header>
         <div className="pb-content">{error && <div className="pb-alert" role="alert"><span>Une partie des données n’a pas pu être synchronisée : {error}</span><button onClick={onClearError} type="button"><Icon name="close" size={15} /></button></div>}{children}</div>
       </section>

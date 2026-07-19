@@ -1309,6 +1309,22 @@ function TodayView({ activeClients, calendarEvents, geocoding, googleConnecting,
   const routeDistance = routeSuggestion?.distanceKm;
   const geoReadyCount = rows.filter((row) => projectGeoPoint(row.latitude, row.longitude)).length;
   const briefing = buildBusinessBriefing(priority, productDistribution);
+  const primaryAction = nextAppointmentItem
+    ? `Préparer ${nextAppointmentItem.row?.name || cleanTitle(nextAppointmentItem.title)}`
+    : priority
+      ? `${priority.signal.action} ${priority.name}`
+      : 'Charger le portefeuille';
+  const dayReason = nextAppointmentItem
+    ? nextAppointmentItem.meta
+    : priority?.signal?.reason || 'Aucune pharmacie priorisée pour le moment.';
+  const agendaStateLabel = nextAppointmentItem?.time || (agendaConnected ? 'Agenda vide' : 'Sans agenda');
+  const agendaActionLabel = agendaRequiresReconnect ? 'Reconnecter Google Agenda' : agendaConnected ? 'Synchroniser agenda' : 'Connecter Google Agenda';
+  const signalSummary = [
+    `${activeClients} clients actifs`,
+    `${decisions.length || suggestions.length || urgentCount} priorités`,
+    `${openOrders} commandes ouvertes`,
+    `${formatMoney(orderTotal)} en suivi`,
+  ].join(' · ');
   const routeReason = routeSuggestion
     ? [
       routeSuggestion.sameDepartment ? `même département ${routeSuggestion.row.department}` : null,
@@ -1320,6 +1336,12 @@ function TodayView({ activeClients, calendarEvents, geocoding, googleConnecting,
   return (
     <div className="agent-zero-day">
       <div className="agent-zero-day-heading">
+        <div>
+          <span>{todayLabel} · {userName || 'Agent terrain'}</span>
+          <h1>{primaryAction}</h1>
+          <p>{dayReason}</p>
+          <small>{signalSummary}</small>
+        </div>
         <div className="agent-zero-day-actions">
           <button disabled={!priority} onClick={() => onAction('followup', priority)} type="button">+ Relance</button>
           <button disabled={!priority} onClick={() => onAction('visit', priority)} type="button">+ Visite</button>
@@ -1357,12 +1379,14 @@ function TodayView({ activeClients, calendarEvents, geocoding, googleConnecting,
 
       <div className="agent-zero-day-grid">
         <section className="agent-zero-next-card">
-          <div>
-            <span>{nextAppointmentItem ? 'Prochain rendez-vous' : 'Priorité terrain'}</span>
-            <h2>{nextAppointmentItem?.row?.name || cleanTitle(nextAppointmentItem?.title) || priority?.name || 'Aucune pharmacie priorisée'}</h2>
-            <p>{nextAppointmentItem ? nextAppointmentItem.meta : priority ? `${priority.city} · ${priority.signal.action}` : 'Charge ton portefeuille pour préparer la journée.'}</p>
+          <div className="agent-zero-next-head">
+            <div>
+              <span>{nextAppointmentItem ? 'Prochain rendez-vous' : 'Priorité terrain'}</span>
+              <h2>{nextAppointmentItem?.row?.name || cleanTitle(nextAppointmentItem?.title) || priority?.name || 'Aucune pharmacie priorisée'}</h2>
+              <p>{nextAppointmentItem ? nextAppointmentItem.meta : priority ? `${priority.city} · ${priority.signal.action}` : 'Charge ton portefeuille pour préparer la journée.'}</p>
+            </div>
+            <strong>{agendaStateLabel}</strong>
           </div>
-          <strong>{nextAppointmentItem?.time || (agendaConnected ? 'Agenda vide' : 'Sans agenda')}</strong>
           <div className="agent-zero-briefing">
             <b>✦</b>
             <div>
@@ -1394,7 +1418,7 @@ function TodayView({ activeClients, calendarEvents, geocoding, googleConnecting,
               ? <button disabled={googleSyncing} onClick={onSyncGoogleCalendar} type="button">{googleSyncing ? 'Sync…' : 'Sync agenda'}</button>
               : agendaRequiresReconnect
                 ? <button disabled={googleConnecting} onClick={onConnectGoogle} type="button">{googleConnecting ? 'Connexion…' : 'Reconnecter'}</button>
-              : <button disabled title="Connecte Google Agenda pour synchroniser les rendez-vous" type="button">Optimiser</button>}
+                : <button disabled={googleConnecting} onClick={onConnectGoogle} type="button">{googleConnecting ? 'Connexion…' : 'Connecter'}</button>}
           </header>
           {!hasScheduledAppointment && (
             <article className="agent-zero-calendar-state">
@@ -1408,7 +1432,7 @@ function TodayView({ activeClients, calendarEvents, geocoding, googleConnecting,
                 ? <button className="agent-zero-calendar-connect" disabled={googleSyncing} onClick={onSyncGoogleCalendar} type="button">{googleSyncing ? 'Sync…' : 'Sync agenda'}</button>
                 : agendaRequiresReconnect
                   ? <button className="agent-zero-calendar-connect" disabled={googleConnecting} onClick={onConnectGoogle} type="button">{googleConnecting ? 'Connexion…' : 'Reconnecter'}</button>
-                : <button className="agent-zero-calendar-connect" disabled={googleConnecting} onClick={onConnectGoogle} type="button">{googleConnecting ? 'Connexion…' : 'Connecter'}</button>}
+                  : <button className="agent-zero-calendar-connect" disabled={googleConnecting} onClick={onConnectGoogle} type="button">{googleConnecting ? 'Connexion…' : agendaActionLabel}</button>}
             </article>
           )}
           <div>

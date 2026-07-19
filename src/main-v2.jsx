@@ -19,11 +19,23 @@ function readableAuthError(error) {
 }
 
 function Auth() {
+  const [mode, setMode] = useState('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [role, setRole] = useState('agent');
   const [message, setMessage] = useState('');
+  const [messageType, setMessageType] = useState('error');
   const [submitting, setSubmitting] = useState(false);
   const [resetting, setResetting] = useState(false);
+
+  function switchMode(next) {
+    setMode(next);
+    setMessage('');
+    setPassword('');
+    setConfirm('');
+    setRole('agent');
+  }
 
   async function submit(e) {
     e.preventDefault();
@@ -31,12 +43,28 @@ function Auth() {
     setMessage('');
     try {
       const normalizedEmail = email.trim().toLowerCase();
-      const { error } = await supabase.auth.signInWithPassword({ email: normalizedEmail, password });
-      if (error) {
-        setMessage(readableAuthError(error));
+      if (mode === 'signup') {
+        if (password !== confirm) {
+          setMessage('Les mots de passe ne correspondent pas.');
+          setMessageType('error');
+          setSubmitting(false);
+          return;
+        }
+        const { error } = await supabase.auth.signUp({ email: normalizedEmail, password });
+        if (error) { setMessage(readableAuthError(error)); setMessageType('error'); }
+        else {
+          if (role === 'intervenant') {
+            try { localStorage.setItem('pharma_pending_role', JSON.stringify({ email: normalizedEmail, role: 'intervenant' })); } catch (_) {}
+          }
+          setMessage('Compte créé ! Vérifie ta boîte mail pour confirmer ton adresse.'); setMessageType('ok');
+        }
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email: normalizedEmail, password });
+        if (error) { setMessage(readableAuthError(error)); setMessageType('error'); }
       }
     } catch (error) {
-      setMessage(readableAuthError(error) || 'Connexion impossible. Le service d’authentification ne répond pas.');
+      setMessage(readableAuthError(error) || 'Le service d\'authentification ne répond pas.');
+      setMessageType('error');
     }
     setSubmitting(false);
   }
@@ -45,19 +73,18 @@ function Auth() {
     const normalizedEmail = email.trim().toLowerCase();
     if (!normalizedEmail) {
       setMessage('Renseigne ton email professionnel, puis clique sur mot de passe oublié.');
+      setMessageType('error');
       return;
     }
-
     setResetting(true);
     setMessage('');
     try {
-      const { error } = await supabase.auth.resetPasswordForEmail(normalizedEmail, {
-        redirectTo: window.location.origin,
-      });
-      if (error) setMessage(readableAuthError(error));
-      else setMessage('Email de réinitialisation envoyé. Ouvre le lien reçu pour définir un nouveau mot de passe.');
+      const { error } = await supabase.auth.resetPasswordForEmail(normalizedEmail, { redirectTo: window.location.origin });
+      if (error) { setMessage(readableAuthError(error)); setMessageType('error'); }
+      else { setMessage('Email de réinitialisation envoyé. Ouvre le lien reçu pour définir un nouveau mot de passe.'); setMessageType('ok'); }
     } catch (error) {
-      setMessage(readableAuthError(error) || 'Impossible d’envoyer l’email de réinitialisation.');
+      setMessage(readableAuthError(error) || 'Impossible d\'envoyer l\'email de réinitialisation.');
+      setMessageType('error');
     }
     setResetting(false);
   }
@@ -66,17 +93,55 @@ function Auth() {
     <main className="pb-auth">
       <section className="pb-auth-side">
         <div className="pb-auth-brand"><span className="pb-brand-mark">PB</span><strong>PharmaBiz</strong></div>
-        <div><span className="pb-eyebrow">Field CRM</span><h1>Le cockpit commercial des équipes pharmacie.</h1><p>Comptes, opportunités, visites et réassorts dans une seule vue de travail.</p></div>
-        <div className="pb-auth-feature-list"><span><i />Un compte, plusieurs marques</span><span><i />Des priorités terrain, pas des tableaux décoratifs</span><span><i />Une vision opérationnelle du portefeuille</span></div>
+        <div>
+          <span className="pb-eyebrow">Field CRM</span>
+          <h1>Le cockpit commercial des équipes pharmacie.</h1>
+          <p>Comptes, opportunités, visites et réassorts dans une seule vue de travail.</p>
+        </div>
+        <div className="pb-auth-feature-list">
+          <span><i />Un compte, plusieurs marques</span>
+          <span><i />Des priorités terrain, pas des tableaux décoratifs</span>
+          <span><i />Une vision opérationnelle du portefeuille</span>
+        </div>
       </section>
       <section className="pb-auth-form-side">
         <form className="pb-auth-form" onSubmit={submit}>
-          <div><span className="pb-eyebrow">Espace agent</span><h2>Bienvenue</h2><p>Connecte-toi à ton espace de travail PharmaBiz.</p></div>
+          <div className="pb-auth-tabs">
+            <button className={`pb-auth-tab${mode === 'login' ? ' is-active' : ''}`} onClick={() => switchMode('login')} type="button">Se connecter</button>
+            <button className={`pb-auth-tab${mode === 'signup' ? ' is-active' : ''}`} onClick={() => switchMode('signup')} type="button">Créer un compte</button>
+          </div>
+          <div className="pb-auth-form-header">
+            <span className="pb-eyebrow">{mode === 'signup' ? 'Nouvel espace' : 'Espace agent'}</span>
+            <h2>{mode === 'signup' ? 'Rejoins PharmaBiz' : 'Bienvenue'}</h2>
+            <p>{mode === 'signup' ? 'Crée ton accès et commence à piloter ton terrain.' : 'Connecte-toi à ton espace de travail PharmaBiz.'}</p>
+          </div>
           <label className="pb-field"><span>Email professionnel</span><input autoComplete="email" onChange={(event) => setEmail(event.target.value)} required type="email" value={email} /></label>
-          <label className="pb-field"><span>Mot de passe</span><input autoComplete="current-password" onChange={(event) => setPassword(event.target.value)} required type="password" value={password} /></label>
-          <button className="pb-auth-reset" disabled={resetting || submitting} onClick={requestPasswordReset} type="button">{resetting ? 'Envoi du lien…' : 'Mot de passe oublié ?'}</button>
-          {message && <div className="pb-alert pb-auth-alert">{message}</div>}
-          <button className="pb-button pb-button-primary pb-auth-submit" disabled={submitting} type="submit">{submitting ? 'Connexion…' : 'Se connecter'}</button>
+          <label className="pb-field"><span>Mot de passe</span><input autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} minLength={mode === 'signup' ? 8 : undefined} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} /></label>
+          {mode === 'signup' && (
+            <label className="pb-field"><span>Confirmer le mot de passe</span><input autoComplete="new-password" onChange={(event) => setConfirm(event.target.value)} required type="password" value={confirm} /></label>
+          )}
+          {mode === 'signup' && (
+            <div className="pb-auth-roles">
+              <span className="pb-eyebrow">Mon rôle terrain</span>
+              <div className="pb-auth-role-grid">
+                <button className={`pb-auth-role-card${role === 'agent' ? ' is-active' : ''}`} onClick={() => setRole('agent')} type="button">
+                  <strong>Agent commercial</strong>
+                  <em>Gestion de portefeuille pharmacies, commandes, visites et suivi des ventes.</em>
+                </button>
+                <button className={`pb-auth-role-card${role === 'intervenant' ? ' is-active' : ''}`} onClick={() => setRole('intervenant')} type="button">
+                  <strong>Animateur / Formateur</strong>
+                  <em>Missions d'animation terrain et sessions de formation en officine.</em>
+                </button>
+              </div>
+            </div>
+          )}
+          {mode === 'login' && (
+            <button className="pb-auth-reset" disabled={resetting || submitting} onClick={requestPasswordReset} type="button">{resetting ? 'Envoi du lien…' : 'Mot de passe oublié ?'}</button>
+          )}
+          {message && <div className={`pb-auth-alert${messageType === 'ok' ? ' pb-auth-alert-ok' : ''}`}>{message}</div>}
+          <button className="pb-auth-submit" disabled={submitting} type="submit">
+            {submitting ? (mode === 'signup' ? 'Création…' : 'Connexion…') : (mode === 'signup' ? 'Créer mon compte' : 'Se connecter')}
+          </button>
         </form>
       </section>
     </main>
@@ -131,6 +196,20 @@ function RoleRouter({ session }) {
     let mounted = true;
     async function loadRole() {
       const userId = session.user.id;
+      const userEmail = session.user.email?.toLowerCase() || '';
+
+      // Apply pending role from signup if present
+      try {
+        const pending = JSON.parse(localStorage.getItem('pharma_pending_role') || 'null');
+        if (pending?.role === 'intervenant' && pending?.email === userEmail) {
+          const { data: existing } = await supabase.from('field_animators').select('id').eq('user_id', userId).maybeSingle();
+          if (!existing) {
+            await supabase.from('field_animators').insert({ user_id: userId, full_name: userEmail, email: userEmail, status: 'active' });
+          }
+          localStorage.removeItem('pharma_pending_role');
+        }
+      } catch (_) {}
+
       const [profileResponse, animatorResponse] = await Promise.all([
         supabase.from('profiles').select('*').eq('id', userId).maybeSingle(),
         supabase.from('field_animators').select('id,status').eq('user_id', userId).maybeSingle(),
@@ -148,7 +227,7 @@ function RoleRouter({ session }) {
   if (context.role === 'admin') return <AdminWorkspace session={session} />;
   if (context.role === 'brand') return <BrandWorkspace session={session} />;
   if (context.role === 'provider') return <ProviderWorkspace session={session} />;
-  return <Workspace session={session} />;
+  return <Workspace preferredRole={context.role} session={session} />;
 }
 
 function App() {

@@ -16,6 +16,7 @@ const emptyAgentState = {
   orderItems: [],
   followUps: [],
   activities: [],
+  missions: [],
   integrationConnections: [],
   calendarEvents: [],
   whatsappMessages: [],
@@ -23,7 +24,10 @@ const emptyAgentState = {
 };
 
 function isMissingTable(error) {
-  return error?.code === '42P01' || /does not exist/i.test(error?.message || '');
+  if (!error) return false;
+  if (error.code === '42P01') return true;
+  const msg = String(error.message || '');
+  return /does not exist/i.test(msg) || /schema cache/i.test(msg) || /PGRST20[04]/i.test(String(error.code || ''));
 }
 
 function uniqueById(items) {
@@ -103,6 +107,7 @@ export function useAgentWorkspaceData(session) {
       supabase.from('ai_actions').select('*, pharmacies(name), brands(name)').order('created_at', { ascending: false }).limit(20),
       supabase.from('integration_connections').select('*').eq('user_id', userId),
       supabase.from('integration_events').select('*').eq('provider', 'google').order('created_at', { ascending: false }).limit(100),
+      supabase.from('missions').select('*, pharmacies(name, city), brands(name)').order('created_at', { ascending: false }).limit(100),
     ]);
 
     const capabilitiesMissing = isMissingTable(calls[0].error);
@@ -112,6 +117,7 @@ export function useAgentWorkspaceData(session) {
     const activitiesMissing = isMissingTable(calls[10].error);
     const integrationsMissing = isMissingTable(calls[13].error);
     const integrationEventsMissing = isMissingTable(calls[14].error);
+    const missionsMissing = isMissingTable(calls[15].error);
 
     const errors = calls
       .map((result, index) => {
@@ -122,6 +128,7 @@ export function useAgentWorkspaceData(session) {
         if (index === 10 && activitiesMissing) return null;
         if (index === 13 && integrationsMissing) return null;
         if (index === 14 && integrationEventsMissing) return null;
+        if (index === 15 && missionsMissing) return null;
         return result.error;
       })
       .filter(Boolean);
@@ -171,6 +178,7 @@ export function useAgentWorkspaceData(session) {
       orderItems,
       followUps,
       activities,
+      missions: missionsMissing ? [] : (calls[15].data || []).filter((m) => portfolioPharmacyIds.has(m.pharmacy_id)),
       integrationConnections: integrationsMissing ? [] : calls[13].data || [],
       calendarEvents: integrationEventsMissing ? [] : calls[14].data || [],
       whatsappMessages: calls[11].data || [],
@@ -284,7 +292,7 @@ export function useAgentWorkspaceData(session) {
       total_after_discount_ht: totalHt,
       vat_amount: vatAmount,
       total_ttc: totalTtc,
-      notes: notes || 'Brouillon commande créé depuis l’espace agent.',
+      notes: notes || "Brouillon commande créé depuis l’espace agent.",
       created_by: state.profile?.id || null,
     }).select('id').single();
 
@@ -306,10 +314,33 @@ export function useAgentWorkspaceData(session) {
     return { error: null, orderId: insertedOrder?.id || null };
   }, [load, state.agent?.id, state.products, state.profile?.id]);
 
+  const createMission = useCallback(async ({ brandId, notes, pharmacyId, plannedDate, title, type }) => {
+    if (!state.agent?.id) return { error: 'Profil agent introuvable.' };
+    if (!pharmacyId) return { error: "Sélectionne une pharmacie." };
+    if (!type) return { error: 'Sélectionne un type de mission.' };
+
+    const { error: insertError } = await supabase.from('missions').insert({
+      agent_id: state.agent.id,
+      pharmacy_id: pharmacyId,
+      brand_id: brandId || null,
+      type,
+      title: title || type,
+      planned_date: plannedDate || null,
+      notes: notes || null,
+      status: 'draft',
+      created_by: state.profile?.id || null,
+    });
+
+    if (insertError) return { error: insertError.message };
+    await load();
+    return { error: null };
+  }, [load, state.agent?.id, state.profile?.id]);
+
   return {
     clearError: () => setError(''),
     createFieldActivity,
     createFollowUp,
+    createMission,
     createOrderDraft,
     error,
     lastSyncedAt,

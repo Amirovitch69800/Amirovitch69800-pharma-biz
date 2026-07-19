@@ -51,7 +51,7 @@ function getSupabaseConfig() {
 }
 
 function getHubSpotToken() {
-  return Deno.env.get('HUBSPOT_PRIVATE_APP_TOKEN') || Deno.env.get('HUBSPOT_CLIENT_ID');
+  return Deno.env.get('HUBSPOT_PRIVATE_APP_TOKEN');
 }
 
 async function getUserId(authorization: string) {
@@ -259,7 +259,6 @@ function mapLineItemToPayload(
   const quantity = parseHubSpotNumber(properties.quantity) || 1;
   const unitPriceHt = parseHubSpotNumber(properties.price) || parseHubSpotNumber(properties.amount) || Number(product?.unit_price_ht || 0);
   const discountRate = parseHubSpotNumber(properties.hs_discount_percentage);
-  const lineTotalHt = Number((quantity * unitPriceHt * (1 - discountRate / 100)).toFixed(2));
 
   return {
     order_id: orderId,
@@ -270,7 +269,6 @@ function mapLineItemToPayload(
     pcb: 1,
     unit_price_ht: unitPriceHt,
     discount_rate: discountRate,
-    line_total_ht: lineTotalHt,
     updated_at: new Date().toISOString(),
   };
 }

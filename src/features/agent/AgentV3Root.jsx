@@ -1,13 +1,16 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { CircleMarker, MapContainer, Popup, TileLayer, useMap } from 'react-leaflet';
+import 'leaflet/dist/leaflet.css';
 import { formatDate, formatDateTime, formatLabel, formatMoney, isOverdue } from '../../lib/formatters.js';
 import { connectIntegration, geocodeAgentPharmacies, syncGoogleCalendar, syncHubSpotLineItems, syncHubSpotPrivateApp } from '../../lib/integrations.js';
+import { supabase } from '../../lib/supabase.js';
 import { FRANCE_DEPARTMENTS } from './franceDepartments.js';
 
 const NAV_ITEMS = [
   ['today', '🏠', 'Jour'],
-  ['portfolio', '●', 'Comptes'],
-  ['visit', '↗', 'Tournée'],
-  ['orders', '📦', 'Cmdes'],
+  ['portfolio', '●', 'Portfolio'],
+  ['results', '▣', 'Résultats'],
+  ['settings', '⚙', 'Réglages'],
 ];
 
 const DEPARTMENT_POSITIONS = {
@@ -40,6 +43,30 @@ const NAALI_CATALOGUE_REFERENCE_TOTAL = 21;
 
 function normalize(value) {
   return String(value || '').trim().toLowerCase();
+}
+
+const PHARMACY_SKIP_WORDS = new Set([
+  'pharmacie', 'parapharmacie', 'pharm', 'grande', 'grand', 'petite', 'petit',
+  'vieux', 'vieille', 'nouveau', 'nouvelle', 'belle', 'beau',
+  'visite', 'rdv', 'appel', 'relance', 'passage',
+  'pour', 'dans', 'avec', 'par', 'sur', 'les', 'des', 'une', 'aux',
+  'rue', 'avenue', 'place', 'du', 'de', 'la', 'le',
+]);
+
+function textSharesPharmacyName(text, pharmacyName) {
+  const words = (s) => normalize(s)
+    .replace(/[.,\\/()]/g, ' ')
+    .split(/[\s\-]+/)
+    .filter((w) => w.length >= 2 && !PHARMACY_SKIP_WORDS.has(w));
+  const textSet = new Set(words(text));
+  const nameWords = words(pharmacyName);
+  if (!nameWords.length) return false;
+  const shared = nameWords.filter((w) => textSet.has(w));
+  return shared.some((w) => w.length >= 8) || shared.length >= 2;
+}
+
+function cleanTitle(value) {
+  return String(value || '').replace(/(\s*[-–]\s*\d{5,})+$/g, '').replace(/^(visite|rdv|appel|relance)\s*[·•]\s*/i, '').trim();
 }
 
 function getPharmacyName(item) {
@@ -151,8 +178,9 @@ function buildCalendarItems(events, rows) {
       const start = getCalendarEventStart(event);
       const startDate = parseCalendarDate(start);
       const pharmacyId = payload.pharmacy_id || payload.local_pharmacy_id || null;
+      const eventText = payload.summary || payload.title || payload.location || '';
       const row = rows.find((candidate) => candidate.pharmacyId === pharmacyId)
-        || rows.find((candidate) => normalize(payload.summary || payload.title || payload.location).includes(normalize(candidate.name)))
+        || rows.find((candidate) => textSharesPharmacyName(eventText, candidate.name))
         || null;
       return {
         id: event.id,
@@ -282,7 +310,7 @@ function buildPortfolioRows(state) {
     const row = {
       id: portfolioItem.id || pharmacy.id,
       pharmacyId: pharmacy.id || portfolioItem.pharmacy_id,
-      name: getPharmacyName(pharmacy),
+      name: cleanTitle(getPharmacyName(pharmacy)),
       city: getPharmacyCity(pharmacy),
       addressLine1: pharmacy.address_line1 || null,
       postalCode: pharmacy.postal_code || null,
@@ -327,7 +355,7 @@ function buildActivityItems(rows, activities) {
         row,
         type: activity.activity_type || 'visit',
         title: activity.title || row?.name || 'Action terrain',
-        meta: [row?.name, row?.city, activity.brands?.name].filter(Boolean).join(' · ') || activity.notes || 'Planifié dans PharmaBiz',
+        meta: [row?.city, activity.brands?.name].filter(Boolean).join(' · ') || activity.notes || 'Planifié dans PharmaBiz',
         due: activity.activity_date,
         time: readCalendarTime(activity.activity_date),
         startDate: activityDate,
@@ -406,7 +434,7 @@ function buildAiRecommendations(rows, todayItems, productDistribution, calendarI
         daysSinceOrder !== null && daysSinceOrder >= 30 && daysSinceOrder < 45 ? { score: 15, label: `commande à surveiller : ${daysSinceOrder} jours` } : null,
         !row.memory?.orderCount ? { score: 18, label: 'aucun historique commande disponible' } : null,
         lowDistribution ? { score: 18, label: `DN faible : ${distribution.rateLabel}` } : null,
-        row.priority === 'priority' || row.priority === 'high' ? { score: 16, label: `priorité ${formatLabel(row.priority)}` } : null,
+        row.priority === 'priority' || row.priority === 'high' ? { score: 16, label: formatLabel(row.priority) } : null,
         row.revenue > 0 ? { score: 8, label: `CA suivi ${formatMoney(row.revenue)}` } : null,
         !row.phone && !row.email ? { score: 7, label: 'contact direct manquant' } : null,
         hasGps ? { score: 3, label: 'coordonnées GPS disponibles' } : null,
@@ -455,6 +483,78 @@ function buildAiRecommendations(rows, todayItems, productDistribution, calendarI
     .filter((recommendation) => recommendation.score > 0)
     .sort((a, b) => b.score - a.score || a.row.name.localeCompare(b.row.name))
     .slice(0, 5);
+}
+
+function buildDayRoute(rows, plannedItems) {
+  const geoRows = rows.filter((row) => Number.isFinite(Number(row.latitude)) && Number.isFinite(Number(row.longitude)));
+
+  // Fixed stops from calendar/activities today
+  const today = new Date().toDateString();
+  const fixedStops = plannedItems
+    .filter((item) => item.startDate && item.startDate.toDateString() === today && item.row)
+    .map((item) => ({ ...item.row, time: item.time, fixedTime: item.startDate, fromCalendar: true }));
+  const fixedIds = new Set(fixedStops.map((s) => s.pharmacyId));
+
+  // Priority candidates with GPS
+  const candidates = geoRows
+    .filter((row) => !fixedIds.has(row.pharmacyId))
+    .filter((row) => row.signal?.tone === 'hot' || row.signal?.tone === 'warn' || row.priority === 'priority' || row.priority === 'high')
+    .map((row) => ({
+      ...row,
+      score: (row.signal?.tone === 'hot' ? 30 : row.signal?.tone === 'warn' ? 18 : 8)
+        + (row.priority === 'priority' || row.priority === 'high' ? 20 : 0)
+        + (isOverdue(row.nextActionAt) ? 15 : 0),
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 8);
+
+  // Nearest-neighbor ordering of candidates
+  const ordered = [...fixedStops];
+  const remaining = [...candidates];
+  let last = ordered[ordered.length - 1] || geoRows[0] || null;
+
+  while (remaining.length > 0 && ordered.length < 6) {
+    if (!last) { ordered.push(remaining.shift()); last = ordered[ordered.length - 1]; continue; }
+    let bestIdx = 0;
+    let bestDist = Infinity;
+    remaining.forEach((row, idx) => {
+      const d = getGeoDistanceKm(last, row);
+      if (d !== null && d < bestDist) { bestDist = d; bestIdx = idx; }
+    });
+    const next = remaining.splice(bestIdx, 1)[0];
+    ordered.push(next);
+    last = next;
+  }
+
+  // Compute legs
+  const stops = ordered.map((stop, idx) => {
+    const prev = idx > 0 ? ordered[idx - 1] : null;
+    const distKm = prev ? getGeoDistanceKm(prev, stop) : null;
+    return { ...stop, distKm, stopIndex: idx + 1 };
+  });
+
+  const totalKm = stops.reduce((sum, s) => sum + (s.distKm || 0), 0);
+
+  // Nearby opportunities: rows close to any stop but not in route or already planned
+  const routeIds = new Set(stops.map((s) => s.pharmacyId));
+  const unmatchedEventTitles = plannedItems
+    .filter((item) => !item.row)
+    .map((item) => item.title || '');
+  const opportunities = geoRows
+    .filter((row) => {
+      if (routeIds.has(row.pharmacyId)) return false;
+      if (unmatchedEventTitles.some((title) => textSharesPharmacyName(title, row.name))) return false;
+      return true;
+    })
+    .map((row) => {
+      const minDist = Math.min(...stops.map((s) => getGeoDistanceKm(s, row) ?? Infinity));
+      return { ...row, minDist };
+    })
+    .filter((row) => row.minDist < 12)
+    .sort((a, b) => a.minDist - b.minDist)
+    .slice(0, 3);
+
+  return { stops, totalKm: Math.round(totalKm), opportunities, geoCount: geoRows.length };
 }
 
 function buildRouteSuggestion(rows, priority) {
@@ -605,28 +705,15 @@ function buildAgentProductDistribution(rows) {
   };
 }
 
-function buildMapViewBox(clusters) {
-  if (!clusters.length) return '0 0 100 100';
-  const xs = clusters.map((cluster) => cluster.x);
-  const ys = clusters.map((cluster) => cluster.y);
-  const minX = Math.max(0, Math.min(...xs) - 16);
-  const maxX = Math.min(100, Math.max(...xs) + 16);
-  const minY = Math.max(0, Math.min(...ys) - 16);
-  const maxY = Math.min(100, Math.max(...ys) + 16);
-  return `${minX} ${minY} ${Math.max(18, maxX - minX)} ${Math.max(18, maxY - minY)}`;
-}
+const ORDER_COLORS = { hot: '#22c55e', warm: '#f97316', cold: '#ef4444', none: '#94a3b8' };
 
-function buildPharmacyMapPoint(row, cluster, index) {
-  const projected = projectGeoPoint(row.latitude, row.longitude);
-  if (projected) return { ...projected, precise: true };
-  const hash = stableHash(`${row.name}-${row.addressLine1}-${row.postalCode}-${row.city}`);
-  const angle = ((Math.abs(hash) % 360) / 180) * Math.PI;
-  const radius = 1.5 + (index % 5) * 0.65;
-  return {
-    precise: false,
-    x: cluster.x + Math.cos(angle) * radius,
-    y: cluster.y + Math.sin(angle) * radius,
-  };
+function pharmacyOrderStatus(row) {
+  const lastOrder = row.memory?.lastOrderAt;
+  if (!lastOrder) return 'none';
+  const days = Math.floor((Date.now() - new Date(lastOrder).getTime()) / 86400000);
+  if (days <= 45) return 'hot';
+  if (days <= 90) return 'warm';
+  return 'cold';
 }
 
 function buildOrderMetrics(orders) {
@@ -643,6 +730,7 @@ export default function AgentV3Root({
   onClearError,
   onCreateActivity,
   onCreateFollowUp,
+  onCreateMission,
   onCreateOrderDraft,
   onReload,
   onSignOut,
@@ -692,6 +780,28 @@ export default function AgentV3Root({
   const activeClients = rows.filter((row) => ['active', 'client', 'implanted'].includes(row.status)).length;
   const openOrders = (state.orders || []).filter((order) => !['cancelled', 'delivered', 'invoiced'].includes(order.status)).length;
   const orderMetrics = useMemo(() => buildOrderMetrics(state.orders || []), [state.orders]);
+  const [annualTarget, setAnnualTarget] = useState(() => Number(localStorage.getItem('az_annual_target') || 0));
+
+  const agentKpis = useMemo(() => {
+    const currentYear = new Date().getFullYear();
+    const ytdOrders = (state.orders || []).filter((order) => {
+      const d = parseCalendarDate(order.order_date || order.created_at);
+      return d && d.getFullYear() === currentYear;
+    });
+    const paidStatuses = ['paid', 'approved', 'to_invoice', 'invoiced'];
+    const paidYtdOrders = ytdOrders.filter((order) => paidStatuses.includes(order.status));
+    const calcCommission = (orders) => orders.reduce((sum, order) => {
+      const rate = order.order_type === 'implantation' ? 0.20 : 0.15;
+      return sum + getOrderTotal(order) * rate;
+    }, 0);
+    const ytdRevenue = ytdOrders.reduce((sum, order) => sum + getOrderTotal(order), 0);
+    return {
+      ytdRevenue,
+      roRatio: annualTarget > 0 ? ytdRevenue / annualTarget : null,
+      commissionVersee: calcCommission(paidYtdOrders),
+      commissionAttendue: calcCommission(ytdOrders),
+    };
+  }, [state.orders, annualTarget]);
 
   function openAction(type, row = selected) {
     if (!row) return;
@@ -803,22 +913,6 @@ export default function AgentV3Root({
       </aside>
 
       <section className="agent-zero-shell">
-        <header className="agent-zero-topbar">
-          <label className="agent-zero-search">
-            <span>⌕</span>
-            <input onChange={(event) => setQuery(event.target.value)} placeholder="Rechercher une pharmacie, une ville, une action…" value={query} />
-          </label>
-          <div className="agent-zero-actions">
-            <button className="agent-zero-sync" onClick={onReload} type="button">{lastSyncedAt ? `Sync ${formatDateTime(lastSyncedAt)}` : 'Synchroniser'}</button>
-            <button className="agent-zero-sync agent-zero-hubspot-sync" disabled={hubspotSyncing} onClick={handleHubSpotSync} type="button">
-              {hubspotSyncing ? 'HubSpot…' : 'Sync HubSpot'}
-            </button>
-            <button className="agent-zero-sync agent-zero-hubspot-sync" disabled={hubspotLineItemsSyncing} onClick={handleHubSpotLineItemsSync} type="button">
-              {hubspotLineItemsSyncing ? 'Lignes…' : 'Lignes HubSpot'}
-            </button>
-            <button className="agent-zero-add" onClick={() => openAction('visit')} type="button">+ Ajouter</button>
-          </div>
-        </header>
 
         {hubspotNotice && (
           <div className="agent-zero-alert agent-zero-alert-info" role="status">
@@ -858,7 +952,9 @@ export default function AgentV3Root({
               googleConnection={(state.integrationConnections || []).find((connection) => connection.provider === 'google')}
               googleNeedsReconnect={googleNeedsReconnect}
               googleSyncing={googleSyncing}
+              implantation={productDistribution.rateLabel}
               items={todayItems}
+              kpis={agentKpis}
               onAction={openAction}
               onConnectGoogle={handleConnectGoogle}
               onGeocode={handleGeocodePharmacies}
@@ -873,40 +969,19 @@ export default function AgentV3Root({
             />
           ) : (
             <>
-              <div className="agent-zero-hero-card">
-                <div>
-                  <span className="agent-zero-kicker">Aujourd’hui</span>
-                  <h1>Le cockpit terrain qui te dit quoi faire maintenant.</h1>
-                  <p>Décision, préparation, exécution et suite : l’espace agent repart sur la direction artistique du prototype, avec les vraies données PharmaBiz branchées derrière.</p>
-                  <div className="agent-zero-hero-actions">
-                    <button onClick={() => openAction('visit')} type="button">Préparer la prochaine visite</button>
-                    <button onClick={() => setActiveView('portfolio')} type="button">Voir le portefeuille</button>
-                  </div>
-                </div>
-                <div className="agent-zero-score">
-                  <span>Portefeuille</span>
-                  <strong>{rows.length}</strong>
-                  <small>pharmacies couvertes</small>
-                </div>
-              </div>
-
-              <div className="agent-zero-metrics">
-                <Metric label="Clients actifs" value={activeClients} note="relations marque actives" />
-                <Metric label="À prioriser" value={urgentCount} note="retards ou priorité forte" tone="orange" />
-                <Metric label="Commandes ouvertes" value={openOrders} note="brouillons / envoyées" />
-                <Metric label="DN produit" value={productDistribution.rateLabel} note={productDistribution.note} />
-              </div>
-
-              <div className="agent-zero-main-grid">
+              <div className={`agent-zero-main-grid${activeView !== 'today' ? ' is-full' : ''}`}>
                 <section className="agent-zero-panel agent-zero-panel-large">
-              {activeView === 'portfolio' && <PortfolioView activeDepartment={activeDepartment} departments={departments} onAction={openAction} rows={filteredRows} selected={selected} setActiveDepartment={setActiveDepartment} setSelectedPharmacyId={setSelectedPharmacyId} totalRows={rows.length} />}
-              {activeView === 'visit' && <VisitView onAction={openAction} selected={selected} />}
-              {activeView === 'orders' && <OrdersView onAction={openAction} orders={state.orders || []} products={state.products || []} selected={selected} />}
+              {activeView === 'portfolio' && <PortfolioView activeDepartment={activeDepartment} departments={departments} geocoding={geocoding} onAction={openAction} onGeocode={handleGeocodePharmacies} productDistribution={productDistribution} query={query} rows={filteredRows} selected={selected} setActiveDepartment={setActiveDepartment} setQuery={setQuery} setSelectedPharmacyId={setSelectedPharmacyId} totalRows={rows.length} />}
+
+              {activeView === 'results' && <ResultsView kpis={agentKpis} missions={state.missions || []} onAction={openAction} onCreateMission={onCreateMission} orders={state.orders || []} products={state.products || []} rows={rows} selected={selected} />}
+              {activeView === 'settings' && <SettingsView annualTarget={annualTarget} geocoding={geocoding} geocodingNotice={geocodingNotice} googleConnecting={googleConnecting} googleConnection={(state.integrationConnections || []).find((c) => c.provider === 'google')} googleNeedsReconnect={googleNeedsReconnect} googleNotice={googleNotice} googleSyncing={googleSyncing} hubspotLineItemsSyncing={hubspotLineItemsSyncing} hubspotNotice={hubspotNotice} hubspotSyncing={hubspotSyncing} lastSyncedAt={lastSyncedAt} onAnnualTargetChange={(v) => { setAnnualTarget(v); localStorage.setItem('az_annual_target', String(v)); }} onConnectGoogle={handleConnectGoogle} onGeocode={handleGeocodePharmacies} onHubSpotLineItemsSync={handleHubSpotLineItemsSync} onHubSpotSync={handleHubSpotSync} onReload={onReload} onSignOut={onSignOut} profile={state.profile} />}
                 </section>
 
-                <aside className="agent-zero-panel agent-zero-detail">
-                  <PharmacyDetail onAction={openAction} productDistribution={productDistribution} selected={selected} selectedProductDistribution={selectedProductDistribution} />
-                </aside>
+                {activeView === 'today' && (
+                  <aside className="agent-zero-panel agent-zero-detail">
+                    <PharmacyDetail onAction={openAction} productDistribution={productDistribution} selected={selected} selectedProductDistribution={selectedProductDistribution} />
+                  </aside>
+                )}
               </div>
             </>
           )}
@@ -937,7 +1012,235 @@ export default function AgentV3Root({
           products={state.products || []}
         />
       )}
+
+      <AgentChat context={{
+        agentName: name,
+        date: new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }),
+        totalPharmacies: rows.length,
+        totalRevenue: rows.reduce((sum, r) => sum + (r.revenue || 0), 0),
+        dnRate: productDistribution?.rateLabel || 'N/A',
+        urgentCount,
+        pharmacies: rows.map((r) => ({
+          name: r.name,
+          city: r.city,
+          dn: r.distributionRate || null,
+          lastOrder: r.memory?.lastOrderAt || null,
+          daysSinceOrder: r.memory?.lastOrderAt ? Math.floor((Date.now() - new Date(r.memory.lastOrderAt).getTime()) / 86400000) : null,
+          priority: r.priority || null,
+          revenue: r.revenue || null,
+          action: r.signal?.action || 'A traiter',
+        })),
+      }} />
     </main>
+  );
+}
+
+function AgentChat({ context }) {
+  const [open, setOpen] = useState(false);
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const bottomRef = useRef(null);
+
+  const scrollToBottom = useCallback(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, []);
+
+  const send = useCallback(async (text) => {
+    const userMessage = text.trim();
+    if (!userMessage || loading) return;
+    const next = [...messages, { role: 'user', content: userMessage }];
+    setMessages(next);
+    setInput('');
+    setLoading(true);
+    setTimeout(scrollToBottom, 50);
+
+    const { data, error } = await supabase.functions.invoke('agent-chat', {
+      body: { messages: next, context },
+    });
+
+    setLoading(false);
+    if (error || !data?.reply) {
+      setMessages((prev) => [...prev, { role: 'assistant', content: error?.message || 'Erreur de connexion au service IA.' }]);
+    } else {
+      setMessages((prev) => [...prev, { role: 'assistant', content: data.reply }]);
+    }
+    setTimeout(scrollToBottom, 50);
+  }, [context, loading, messages, scrollToBottom]);
+
+  const handleKey = useCallback((e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      send(input);
+    }
+  }, [input, send]);
+
+  return (
+    <>
+      <button
+        aria-label="Assistant IA"
+        className={`agent-chat-trigger ${open ? 'is-open' : ''}`}
+        onClick={() => setOpen((v) => !v)}
+        type="button"
+      >
+        <svg className="agent-chat-robot" fill="none" height="100" viewBox="0 0 56 92" width="64" xmlns="http://www.w3.org/2000/svg">
+          {/* === ANTENNAS === */}
+          <g className="agent-robot-antenna">
+            <line stroke="#E86A2A" strokeLinecap="round" strokeWidth="2" x1="19" x2="19" y1="4" y2="12" />
+            <circle cx="19" cy="3" fill="#FFD700" r="3" stroke="#C04E10" strokeWidth="1" />
+          </g>
+          <line stroke="#E86A2A" strokeLinecap="round" strokeWidth="2" x1="37" x2="37" y1="4" y2="12" />
+          <circle cx="37" cy="3" fill="#FFD700" r="3" stroke="#C04E10" strokeWidth="1" />
+
+          {/* === HEAD === */}
+          {/* Head shadow facets */}
+          <polygon fill="#C04E10" points="10,14 46,14 46,34 42,36 14,36 10,34" />
+          {/* Head main */}
+          <rect fill="#E86A2A" height="22" rx="5" width="36" x="10" y="12" />
+          {/* Head top highlight */}
+          <polygon fill="#F5892A" points="14,12 42,12 40,16 16,16" opacity="0.7" />
+          {/* Ear left */}
+          <circle cx="10" cy="23" fill="#C04E10" r="5" />
+          <circle cx="10" cy="23" fill="#E86A2A" r="3.5" />
+          {/* Ear right */}
+          <circle cx="46" cy="23" fill="#C04E10" r="5" />
+          <circle cx="46" cy="23" fill="#E86A2A" r="3.5" />
+          {/* Eye left */}
+          <circle className="agent-robot-eye" cx="21" cy="21" fill="#111" r="6" />
+          <circle cx="21" cy="21" fill="#00FFCC" r="4.5" />
+          <circle cx="21" cy="21" fill="#00cc99" r="2" />
+          <circle cx="19.5" cy="19.5" fill="white" r="1.2" />
+          {/* Eye right */}
+          <circle className="agent-robot-eye" cx="35" cy="21" fill="#111" r="6" />
+          <circle cx="35" cy="21" fill="#00FFCC" r="4.5" />
+          <circle cx="35" cy="21" fill="#00cc99" r="2" />
+          <circle cx="33.5" cy="19.5" fill="white" r="1.2" />
+          {/* Mouth */}
+          <rect fill="#C04E10" height="5" rx="1.5" width="24" x="16" y="29" />
+          <rect fill="#1a0a00" height="3" rx="1" width="20" x="18" y="30" />
+          <rect fill="#E86A2A" height="3" rx="0.5" width="4" x="19" y="30" />
+          <rect fill="#E86A2A" height="3" rx="0.5" width="4" x="25" y="30" />
+          <rect fill="#E86A2A" height="3" rx="0.5" width="4" x="31" y="30" />
+
+          {/* === NECK === */}
+          <rect fill="#C04E10" height="4" rx="2" width="10" x="23" y="34" />
+
+          {/* === TORSO === */}
+          {/* Torso shadow */}
+          <polygon fill="#C04E10" points="8,38 48,38 50,62 6,62" />
+          {/* Torso main */}
+          <rect fill="#E86A2A" height="24" rx="3" width="38" x="9" y="38" />
+          {/* Torso top highlight */}
+          <polygon fill="#F5892A" opacity="0.5" points="12,38 44,38 43,42 13,42" />
+          {/* Control panel */}
+          <rect fill="#C04E10" height="12" rx="2" width="28" x="14" y="43" />
+          <rect fill="#1a0a00" height="9" rx="1.5" width="24" x="16" y="44.5" />
+          <circle cx="21" cy="49" fill="#E86A2A" r="3" />
+          <circle cx="28" cy="49" fill="#E86A2A" r="3" />
+          <circle cx="35" cy="49" fill="#E86A2A" r="3" />
+
+          {/* === ARMS === */}
+          {/* Left upper arm */}
+          <rect fill="#C04E10" height="13" rx="3" width="9" x="0" y="38" />
+          <rect fill="#E86A2A" height="13" rx="3" width="8" x="0.5" y="38" />
+          {/* Left forearm */}
+          <rect fill="#C04E10" height="11" rx="2" width="8" x="0.5" y="52" />
+          <rect fill="#E86A2A" height="10" rx="2" width="7" x="1" y="52.5" />
+          {/* Left hand */}
+          <rect fill="#C04E10" height="6" rx="3" width="10" x="-0.5" y="62" />
+          <rect fill="#E86A2A" height="5" rx="2.5" width="9" x="0" y="62.5" />
+
+          {/* Right upper arm */}
+          <rect fill="#C04E10" height="13" rx="3" width="9" x="47" y="38" />
+          <rect fill="#E86A2A" height="13" rx="3" width="8" x="47.5" y="38" />
+          {/* Right forearm */}
+          <rect fill="#C04E10" height="11" rx="2" width="8" x="47.5" y="52" />
+          <rect fill="#E86A2A" height="10" rx="2" width="7" x="48" y="52.5" />
+          {/* Right hand */}
+          <rect fill="#C04E10" height="6" rx="3" width="10" x="46.5" y="62" />
+          <rect fill="#E86A2A" height="5" rx="2.5" width="9" x="47" y="62.5" />
+
+          {/* === HIPS === */}
+          <rect fill="#C04E10" height="5" rx="2" width="32" x="12" y="62" />
+          <rect fill="#E86A2A" height="4" rx="2" width="30" x="13" y="62" />
+
+          {/* === LEGS === */}
+          {/* Left thigh */}
+          <rect fill="#C04E10" height="12" rx="3" width="13" x="12" y="67" />
+          <rect fill="#E86A2A" height="12" rx="3" width="12" x="12.5" y="67" />
+          {/* Left knee */}
+          <rect fill="#C04E10" height="4" rx="2" width="14" x="11.5" y="78" />
+          <rect fill="#F5892A" height="3" rx="2" width="12" x="12.5" y="79" />
+          {/* Left shin */}
+          <rect fill="#C04E10" height="10" rx="2" width="12" x="12.5" y="81" />
+          <rect fill="#E86A2A" height="10" rx="2" width="11" x="13" y="81" />
+
+          {/* Right thigh */}
+          <rect fill="#C04E10" height="12" rx="3" width="13" x="31" y="67" />
+          <rect fill="#E86A2A" height="12" rx="3" width="12" x="31.5" y="67" />
+          {/* Right knee */}
+          <rect fill="#C04E10" height="4" rx="2" width="14" x="30.5" y="78" />
+          <rect fill="#F5892A" height="3" rx="2" width="12" x="31.5" y="79" />
+          {/* Right shin */}
+          <rect fill="#C04E10" height="10" rx="2" width="12" x="31.5" y="81" />
+          <rect fill="#E86A2A" height="10" rx="2" width="11" x="32" y="81" />
+
+          {/* === FEET === */}
+          <rect fill="#C04E10" height="6" rx="2" width="16" x="9" y="85" />
+          <rect fill="#E86A2A" height="5" rx="1.5" width="15" x="9.5" y="85.5" />
+          <rect fill="#C04E10" height="6" rx="2" width="16" x="31" y="85" />
+          <rect fill="#E86A2A" height="5" rx="1.5" width="15" x="31.5" y="85.5" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="agent-chat-panel">
+          <header className="agent-chat-header">
+            <div>
+              <strong>Assistant terrain</strong>
+              <span>GPT-4o · {context.totalPharmacies} pharmacies chargées</span>
+            </div>
+            <button onClick={() => setOpen(false)} type="button">×</button>
+          </header>
+
+          <div className="agent-chat-messages">
+            {messages.length === 0 && (
+              <div className="agent-chat-welcome">
+                <p>Bonjour {context.agentName?.split(' ')[0] || 'Agent'} — pose-moi n&apos;importe quelle question sur ton portefeuille.</p>
+                <div className="agent-chat-suggestions">
+                  {['Quelles pharmacies relancer en priorité ?', 'Analyse mon portefeuille DN', 'Top 3 opportunités réassort'].map((s) => (
+                    <button key={s} onClick={() => send(s)} type="button">{s}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {messages.map((msg, i) => (
+              <div className={`agent-chat-msg ${msg.role === 'user' ? 'is-user' : 'is-assistant'}`} key={i}>
+                {msg.content}
+              </div>
+            ))}
+            {loading && (
+              <div className="agent-chat-msg is-assistant is-loading">
+                <span /><span /><span />
+              </div>
+            )}
+            <div ref={bottomRef} />
+          </div>
+
+          <div className="agent-chat-input">
+            <textarea
+              disabled={loading}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKey}
+              placeholder="Pose ta question..."
+              rows={1}
+              value={input}
+            />
+            <button disabled={loading || !input.trim()} onClick={() => send(input)} type="button">→</button>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -945,29 +1248,61 @@ function Metric({ label, note, tone, value }) {
   return <article className={`agent-zero-metric ${tone ? `is-${tone}` : ''}`}><span>{label}</span><strong>{value}</strong><small>{note}</small></article>;
 }
 
-function TodayView({ activeClients, calendarEvents, geocoding, googleConnecting, googleConnection, googleNeedsReconnect, googleSyncing, items, onAction, onConnectGoogle, onGeocode, onSyncGoogleCalendar, openOrders, orderTotal, productDistribution, rows, selected, urgentCount, userName }) {
-  const [aiExpanded, setAiExpanded] = useState(true);
+function PriorityFeed({ decisions, onAction, suggestions }) {
+  const scrollRef = useRef(null);
+  const items = decisions.length ? decisions : suggestions;
+
+  React.useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || items.length <= 2) return;
+    const step = () => {
+      if (!el) return;
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 2) {
+        el.scrollTop = 0;
+      } else {
+        el.scrollTop += 1;
+      }
+    };
+    const interval = setInterval(step, 60);
+    return () => clearInterval(interval);
+  }, [items.length]);
+
+  if (!items.length) {
+    return <div className="agent-zero-empty-state"><p>Aucune tâche planifiée. Crée une relance ou une visite pour alimenter les priorités.</p></div>;
+  }
+
+  return (
+    <div className="agent-zero-priority-feed" ref={scrollRef}>
+      {items.map((item, index) => (
+        <button
+          key={item.id}
+          onClick={() => item.row && onAction(item.kind === 'task' ? 'followup' : 'visit', item.row)}
+          type="button"
+        >
+          <em>{isOverdue(item.due) ? 'En retard' : item.kind === 'suggestion' ? 'Suggestion' : index === 0 ? 'Priorité' : 'À traiter'}</em>
+          <span><strong>{item.row?.name || cleanTitle(item.title)}</strong><small>{item.reason || item.meta}</small></span>
+          <b>→</b>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function TodayView({ activeClients, calendarEvents, geocoding, googleConnecting, googleConnection, googleNeedsReconnect, googleSyncing, implantation, items, kpis, onAction, onConnectGoogle, onGeocode, onSyncGoogleCalendar, openOrders, orderTotal, productDistribution, rows, selected, urgentCount, userName }) {
   const calendarItems = useMemo(() => buildCalendarItems(calendarEvents, rows), [calendarEvents, rows]);
-  const aiRecommendations = useMemo(() => buildAiRecommendations(rows, items, productDistribution, calendarItems), [calendarItems, items, productDistribution, rows]);
-  const appointmentItems = [...calendarItems, ...items.filter((item) => item.kind === 'activity')]
-    .filter((item) => item.startDate)
-    .sort((first, second) => first.startDate - second.startDate);
-  const nextAppointmentItem = appointmentItems.find((item) => item.startDate >= new Date()) || appointmentItems[0] || null;
-  const priority = nextAppointmentItem?.row || selected || items.find((item) => item.row)?.row || rows[0] || null;
+  const plannedItems = useMemo(() => {
+    const calendarPharmacyIds = new Set(calendarItems.map((item) => item.row?.pharmacyId).filter(Boolean));
+    const deduplicatedActivities = items.filter((item) => item.kind === 'activity' && !calendarPharmacyIds.has(item.row?.pharmacyId));
+    return [...calendarItems, ...deduplicatedActivities]
+      .filter((item) => item.startDate)
+      .sort((first, second) => first.startDate - second.startDate);
+  }, [calendarItems, items]);
+  const nextAppointmentItem = plannedItems.find((item) => item.startDate >= new Date()) || plannedItems[0] || null;
+  const priority = nextAppointmentItem?.row || selected || rows[0] || null;
   const todayLabel = new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'long', weekday: 'long' }).format(new Date());
-  const suggestedPlanning = items.length ? items.slice(0, 4) : rows.slice(0, 4).map((row) => ({
-    id: row.id,
-    kind: 'suggestion',
-    row,
-    title: row.name,
-    meta: `${row.city} · ${row.signal.action}`,
-    due: row.nextActionAt,
-    tone: row.signal.tone === 'hot' ? 'hot' : 'normal',
-    type: row.signal.action,
-  }));
-  const planning = [...calendarItems, ...suggestedPlanning].slice(0, 4);
-  const hasScheduledAppointment = planning.some((item) => item.kind === 'calendar' || item.kind === 'activity');
-  const decisions = items.slice(0, 3);
+  const hasScheduledAppointment = plannedItems.length > 0;
+  const decisions = items.filter((item) => item.kind === 'task' || item.kind === 'activity').slice(0, 3);
+  const suggestions = items.filter((item) => item.kind === 'suggestion').slice(0, 3);
   const agendaConnected = googleConnection?.status === 'connected' && !googleNeedsReconnect;
   const agendaRequiresReconnect = googleConnection?.status === 'connected' && googleNeedsReconnect;
   const routeSuggestion = buildRouteSuggestion(rows, priority);
@@ -985,11 +1320,6 @@ function TodayView({ activeClients, calendarEvents, geocoding, googleConnecting,
   return (
     <div className="agent-zero-day">
       <div className="agent-zero-day-heading">
-        <div>
-          <span>{todayLabel} · {String(userName || 'Agent').split('@')[0]} · agent multimarques</span>
-          <h1>Ta journée, sans bruit inutile.</h1>
-          <p>Les décisions importantes sont priorisées à partir des vraies données disponibles.</p>
-        </div>
         <div className="agent-zero-day-actions">
           <button disabled={!priority} onClick={() => onAction('followup', priority)} type="button">+ Relance</button>
           <button disabled={!priority} onClick={() => onAction('visit', priority)} type="button">+ Visite</button>
@@ -997,11 +1327,39 @@ function TodayView({ activeClients, calendarEvents, geocoding, googleConnecting,
         </div>
       </div>
 
+      <div className="agent-zero-day-kpis">
+        <div>
+          <span>CA YTD</span>
+          <strong>{formatMoney(kpis?.ytdRevenue ?? 0)}</strong>
+          <small>{new Date().getFullYear()}</small>
+        </div>
+        <div>
+          <span>R/O</span>
+          <strong>{kpis?.roRatio !== null && kpis?.roRatio !== undefined ? `${Math.round(kpis.roRatio * 100)} %` : '—'}</strong>
+          <small>de l&apos;objectif</small>
+        </div>
+        <div>
+          <span>Com. versées</span>
+          <strong>{formatMoney(kpis?.commissionVersee ?? 0)}</strong>
+          <small>payé · 20% impl. 15% réassort</small>
+        </div>
+        <div>
+          <span>Com. attendues</span>
+          <strong>{formatMoney(kpis?.commissionAttendue ?? 0)}</strong>
+          <small>toutes commandes YTD</small>
+        </div>
+        <div>
+          <span>Implantation</span>
+          <strong>{implantation || '—'}</strong>
+          <small>DN produit portefeuille</small>
+        </div>
+      </div>
+
       <div className="agent-zero-day-grid">
         <section className="agent-zero-next-card">
           <div>
             <span>{nextAppointmentItem ? 'Prochain rendez-vous' : 'Priorité terrain'}</span>
-            <h2>{nextAppointmentItem?.title || priority?.name || 'Aucune pharmacie priorisée'}</h2>
+            <h2>{nextAppointmentItem?.row?.name || cleanTitle(nextAppointmentItem?.title) || priority?.name || 'Aucune pharmacie priorisée'}</h2>
             <p>{nextAppointmentItem ? nextAppointmentItem.meta : priority ? `${priority.city} · ${priority.signal.action}` : 'Charge ton portefeuille pour préparer la journée.'}</p>
           </div>
           <strong>{nextAppointmentItem?.time || (agendaConnected ? 'Agenda vide' : 'Sans agenda')}</strong>
@@ -1028,19 +1386,7 @@ function TodayView({ activeClients, calendarEvents, geocoding, googleConnecting,
           </div>
         </section>
 
-        <aside className="agent-zero-decisions-card">
-          <header><div><span>Décisions</span><h2>Priorités immédiates</h2></div><b>{decisions.length || urgentCount}</b></header>
-          <div>
-            {(decisions.length ? decisions : planning.slice(0, 3)).map((item, index) => (
-              <button key={item.id} onClick={() => item.row && onAction(index === 0 ? 'followup' : 'visit', item.row)} type="button">
-                <em>{index === 0 ? 'Urgent' : 'Priorité'}</em>
-                <span><strong>{item.title}</strong><small>{item.reason || item.meta}</small></span>
-                <b>→</b>
-              </button>
-            ))}
-          </div>
-        </aside>
-
+        <div className="agent-zero-day-sidebar">
         <section className="agent-zero-planning-card">
           <header>
             <div><span>Planning terrain</span><h2>Ma journée</h2></div>
@@ -1055,7 +1401,7 @@ function TodayView({ activeClients, calendarEvents, geocoding, googleConnecting,
               <strong>Agenda</strong>
               <i className={agendaConnected ? 'is-blue' : 'is-orange'} />
               <div>
-                <b>{agendaRequiresReconnect ? 'Google Agenda à reconnecter' : agendaConnected ? 'Aucun rendez-vous aujourd’hui' : 'Google Agenda non connecté'}</b>
+                <b>{agendaRequiresReconnect ? "Google Agenda à reconnecter" : agendaConnected ? "Aucun rendez-vous aujourd'hui" : "Google Agenda non connecté"}</b>
                 <small>{agendaRequiresReconnect ? 'Google doit redonner une autorisation longue durée pour synchroniser automatiquement.' : agendaConnected ? 'Les prochains rendez-vous synchronisés apparaîtront ici.' : 'Connecte Google Calendar pour afficher uniquement de vrais rendez-vous.'}</small>
               </div>
               {agendaConnected
@@ -1066,16 +1412,27 @@ function TodayView({ activeClients, calendarEvents, geocoding, googleConnecting,
             </article>
           )}
           <div>
-            {planning.map((item, index) => (
+            {plannedItems.map((item, index) => (
               <article className={item.kind === 'activity' && item.type === 'visit' ? 'is-planned-visit' : ''} key={item.id}>
-                <strong>{item.kind === 'calendar' || item.kind === 'activity' ? item.time : item.due ? formatDate(item.due) : 'À planifier'}</strong>
+                <strong>{item.time || (item.due ? formatDate(item.due) : 'À planifier')}</strong>
                 <i className={index === 1 ? 'is-orange' : index === 2 ? 'is-blue' : ''} />
-                <div><b>{item.title}</b><small>{item.meta}</small></div>
-                <em>{item.kind === 'calendar' ? 'RDV Google' : item.kind === 'activity' ? formatLabel(item.type) : item.kind === 'task' ? (isOverdue(item.due) ? 'En retard' : 'Planifié') : 'Suggestion'}</em>
+                <div><b>{item.row?.name || cleanTitle(item.title)}</b><small>{item.meta}</small></div>
+                {item.row && (
+                  <div className="agent-zero-item-actions">
+                    <button onClick={() => onAction('report', item.row)} type="button">CR</button>
+                    <button onClick={() => onAction('order', item.row)} type="button">Cmd</button>
+                    <button onClick={() => onAction('visit', item.row)} type="button">+RDV</button>
+                  </div>
+                )}
               </article>
             ))}
           </div>
         </section>
+
+        <aside className="agent-zero-decisions-card">
+          <header><div><span>Décisions</span><h2>Priorités immédiates</h2></div><b>{decisions.length || suggestions.length || urgentCount}</b></header>
+          <PriorityFeed decisions={decisions} onAction={onAction} suggestions={suggestions} />
+        </aside>
 
         <aside className="agent-zero-route-card">
           <span>Sur ton trajet · GPS {geoReadyCount}/{rows.length}</span>
@@ -1085,162 +1442,690 @@ function TodayView({ activeClients, calendarEvents, geocoding, googleConnecting,
             ? <div className="agent-zero-route-actions"><a href={buildMapsUrl(routeSuggestion.row)} rel="noreferrer" target="_blank">Itinéraire</a><button onClick={() => onAction('visit', routeSuggestion.row)} type="button">Ajouter à la tournée</button><button disabled={geocoding} onClick={onGeocode} type="button">{geocoding ? 'Géocodage…' : 'Affiner GPS'}</button></div>
             : <div className="agent-zero-route-actions"><button disabled type="button">Suggestion indisponible</button><button disabled={geocoding} onClick={onGeocode} type="button">{geocoding ? 'Géocodage…' : 'Géocoder portefeuille'}</button></div>}
         </aside>
+        </div>
 
-        <aside className="agent-zero-assistant-card">
-          <header><div><span>Assistant terrain</span><h2>Demande directement</h2></div><b>IA</b></header>
-          <div className="agent-zero-ai-command"><input readOnly value="Analyse terrain du jour" /><button onClick={() => setAiExpanded((current) => !current)} type="button">{aiExpanded ? 'Masquer' : 'Analyse IA'}</button></div>
-          {aiExpanded && (
-            <div className="agent-zero-ai-recommendations">
-              {aiRecommendations.map((recommendation, index) => (
-                <article key={recommendation.id}>
-                  <header>
-                    <em>#{index + 1} · {recommendation.action}</em>
-                    <strong>{recommendation.row.name}</strong>
-                  </header>
-                  <p>{recommendation.angle}</p>
-                  <small>{recommendation.evidence.join(' · ') || 'signaux limités, recommandation prudente'}</small>
-                  <footer>
-                    <span>Confiance {recommendation.confidence}</span>
-                    <button onClick={() => onAction(recommendation.action === 'Réassort' ? 'order' : recommendation.action === 'Relancer' ? 'followup' : 'visit', recommendation.row)} type="button">{recommendation.nextStep}</button>
-                  </footer>
-                </article>
-              ))}
-              {!aiRecommendations.length && <Empty title="Pas assez de signaux" text="Charge les données HubSpot, l’agenda ou l’historique commandes pour obtenir des recommandations utiles." />}
-            </div>
-          )}
-          <footer><button onClick={() => onAction('visit', aiRecommendations[0]?.row || priority)} type="button">Préparer top priorité</button><button onClick={() => onAction('followup', aiRecommendations[0]?.row || priority)} type="button">Créer relance</button><button onClick={() => onAction('order', aiRecommendations.find((item) => item.action === 'Réassort')?.row || priority)} type="button">Préparer commande</button></footer>
-        </aside>
       </div>
 
-      <div className="agent-zero-day-metrics">
-        <Metric label="CA portefeuille" value={formatMoney(orderTotal)} note={`${activeClients} clients actifs`} />
-        <Metric label="À réassortir" value={urgentCount} note="comptes à traiter" tone="orange" />
-        <Metric label="DN produit" value={productDistribution.rateLabel} note={productDistribution.note} />
-        <Metric label="Missions ouvertes" value={openOrders} note="commandes / actions" />
+    </div>
+  );
+}
+
+const MISSION_TYPES = [
+  ['animation', 'Animation'],
+  ['formation', 'Formation'],
+  ['implantation', 'Implantation'],
+  ['merchandising', 'Merchandising'],
+  ['sell_out', 'Sell-out'],
+  ['other', 'Autre'],
+];
+
+const MISSION_STATUS_LABELS = {
+  draft: 'Brouillon',
+  requested: 'Demandée',
+  qualified: 'Qualifiée',
+  proposed: 'Proposée',
+  accepted: 'Acceptée',
+  assigned: 'Assignée',
+  confirmed: 'Confirmée',
+  scheduled: 'Planifiée',
+  in_progress: 'En cours',
+  report_submitted: 'CR soumis',
+  under_review: 'En révision',
+  completed: 'Terminée',
+  validated: 'Validée',
+  payable: 'Facturable',
+  paid: 'Payée',
+  refused: 'Refusée',
+  cancelled: 'Annulée',
+};
+
+const MISSION_STATUS_COLORS = {
+  draft: '#aaa',
+  requested: '#f59e0b',
+  qualified: '#3b82f6',
+  proposed: '#f59e0b',
+  accepted: '#3b82f6',
+  assigned: '#3b82f6',
+  confirmed: '#3b82f6',
+  scheduled: '#3b82f6',
+  in_progress: '#3b82f6',
+  report_submitted: '#f97316',
+  under_review: '#f97316',
+  completed: '#10b981',
+  validated: '#10b981',
+  payable: '#f97316',
+  paid: '#10b981',
+  refused: '#ef4444',
+  cancelled: '#6b7280',
+};
+
+function MissionsTab({ missions, onCreateMission, rows }) {
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ pharmacyId: '', type: '', title: '', plannedDate: '', notes: '' });
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState('');
+  const [notice, setNotice] = useState('');
+
+  function updateForm(key, value) {
+    setForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    if (!form.pharmacyId || !form.type) {
+      setFormError('Pharmacie et type sont obligatoires.');
+      return;
+    }
+    setSaving(true);
+    setFormError('');
+    const typeLabel = MISSION_TYPES.find(([k]) => k === form.type)?.[1] || form.type;
+    const result = await onCreateMission?.({
+      pharmacyId: form.pharmacyId,
+      type: form.type,
+      title: form.title || typeLabel,
+      plannedDate: form.plannedDate || null,
+      notes: form.notes || null,
+    });
+    setSaving(false);
+    if (result?.error) {
+      setFormError(result.error);
+      return;
+    }
+    setNotice('Mission créée avec statut Brouillon. La marque devra la valider.');
+    setShowForm(false);
+    setForm({ pharmacyId: '', type: '', title: '', plannedDate: '', notes: '' });
+    setTimeout(() => setNotice(''), 4000);
+  }
+
+  return (
+    <div>
+      <div className="agent-zero-mission-header">
+        <div>
+          <strong>{missions.length} mission{missions.length !== 1 ? 's' : ''}</strong>
+          <small>Animation · formation · implantation · audit</small>
+        </div>
+        <button className="agent-zero-mission-create-btn" onClick={() => { setShowForm((v) => !v); setFormError(''); }} type="button">
+          {showForm ? 'Annuler' : '+ Créer une mission'}
+        </button>
+      </div>
+
+      {notice && (
+        <div className="agent-zero-alert agent-zero-alert-info" role="status" style={{ margin: '0 0 0 0' }}>
+          <span>{notice}</span>
+          <button onClick={() => setNotice('')} type="button">×</button>
+        </div>
+      )}
+
+      {showForm && (
+        <form className="agent-zero-mission-form" onSubmit={handleSubmit}>
+          <div className="agent-zero-mission-form-grid">
+            <label>
+              <span>Pharmacie *</span>
+              <select onChange={(e) => updateForm('pharmacyId', e.target.value)} value={form.pharmacyId}>
+                <option value="">Sélectionner...</option>
+                {rows.map((row) => (
+                  <option key={row.pharmacyId} value={row.pharmacyId}>{row.name} — {row.city}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Type de mission *</span>
+              <select onChange={(e) => updateForm('type', e.target.value)} value={form.type}>
+                <option value="">Sélectionner...</option>
+                {MISSION_TYPES.map(([key, label]) => (
+                  <option key={key} value={key}>{label}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Titre (optionnel)</span>
+              <input
+                onChange={(e) => updateForm('title', e.target.value)}
+                placeholder="Ex : Animation Xémose — Pharmacie Martin"
+                type="text"
+                value={form.title}
+              />
+            </label>
+            <label>
+              <span>Date prévue</span>
+              <input
+                onChange={(e) => updateForm('plannedDate', e.target.value)}
+                type="date"
+                value={form.plannedDate}
+              />
+            </label>
+          </div>
+          <label>
+            <span>Notes</span>
+            <textarea
+              onChange={(e) => updateForm('notes', e.target.value)}
+              placeholder="Contexte, objectifs, produits concernés, demande spécifique..."
+              rows={3}
+              value={form.notes}
+            />
+          </label>
+          {formError && <p className="agent-zero-mission-form-error">{formError}</p>}
+          <div className="agent-zero-mission-form-info">
+            La mission sera créée en statut <strong>Brouillon</strong> et devra être validée par la marque avant attribution à un animateur.
+          </div>
+          <button className="agent-zero-mission-submit" disabled={saving} type="submit">
+            {saving ? "Enregistrement..." : "Créer la mission"}
+          </button>
+        </form>
+      )}
+
+      <div className="agent-zero-mission-list">
+        {missions.length === 0 && !showForm && (
+          <p className="agent-zero-mission-empty">
+            Aucune mission pour le moment. Crée une mission pour déclencher une animation ou une formation dans une de tes pharmacies.
+          </p>
+        )}
+        {missions.map((mission) => (
+          <div className="agent-zero-mission-row" key={mission.id}>
+            <div className="agent-zero-mission-row-main">
+              <strong>{mission.title || formatLabel(mission.type || '')}</strong>
+              <small>
+                {mission.pharmacies?.name || '—'}
+                {mission.pharmacies?.city ? ` · ${mission.pharmacies.city}` : ''}
+                {mission.planned_date ? ` · ${formatDate(mission.planned_date)}` : ' · Date à définir'}
+              </small>
+              {mission.notes && <p className="agent-zero-mission-notes">{mission.notes}</p>}
+            </div>
+            <div className="agent-zero-mission-row-meta">
+              <em className="agent-zero-mission-type-badge">{MISSION_TYPES.find(([k]) => k === mission.type)?.[1] || mission.type || '—'}</em>
+              <span
+                className="agent-zero-mission-status-badge"
+                style={{ background: MISSION_STATUS_COLORS[mission.status] || '#aaa' }}
+              >
+                {MISSION_STATUS_LABELS[mission.status] || mission.status || 'Brouillon'}
+              </span>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
 }
 
-function PortfolioView({ activeDepartment, departments, onAction, rows, selected, setActiveDepartment, setSelectedPharmacyId, totalRows }) {
-  const clusters = buildDepartmentClusters(rows);
-  const selectedCluster = clusters.find((cluster) => cluster.department === selected?.department) || clusters[0] || null;
-  const geoReadyCount = rows.filter((row) => projectGeoPoint(row.latitude, row.longitude)).length;
+function ResultsView({ kpis, missions, onAction, onCreateMission, orders, rows }) {
+  const [tab, setTab] = useState('orders');
+  const tabs = [
+    ['orders', 'Commandes'],
+    ['commissions', 'Commissions'],
+    ['missions', 'Missions'],
+  ];
 
-  return <div className="agent-zero-view"><Header eyebrow="Portefeuille" title="Carte terrain clients" text="Seuls les départements avec au moins une pharmacie de ton portefeuille sont affichés." />
-    <div className="agent-zero-department-strip" aria-label="Filtrer par département">
-      <button className={activeDepartment === 'all' ? 'is-active' : ''} onClick={() => setActiveDepartment('all')} type="button"><strong>Tous</strong><span>{totalRows}</span></button>
-      {departments.map((item) => <button className={activeDepartment === item.department ? 'is-active' : ''} key={item.department} onClick={() => setActiveDepartment(item.department)} type="button"><strong>{item.department}</strong><span>{item.count}</span></button>)}
-    </div>
-    <div className="agent-zero-portfolio-grid">
-      <section className="agent-zero-map-panel">
-        <div className="agent-zero-map-head">
-          <div><span>Carte portefeuille</span><strong>{clusters.length} départements actifs · GPS {geoReadyCount}/{rows.length}</strong></div>
-          <div className="agent-zero-map-tools"><button type="button">Clients</button><button type="button">Priorités</button></div>
-        </div>
-        <PortfolioMap clusters={clusters} onSelectDepartment={(department) => {
-          setActiveDepartment(department);
-          const first = clusters.find((cluster) => cluster.department === department)?.rows?.[0];
-          if (first) setSelectedPharmacyId(first.pharmacyId);
-        }} onSelectPharmacy={(row) => setSelectedPharmacyId(row.pharmacyId)} selectedDepartment={selected?.department || selectedCluster?.department} selectedPharmacyId={selected?.pharmacyId} />
-      </section>
-
-      <aside className="agent-zero-map-account">
-        <span className="agent-zero-kicker">Zone active</span>
-        <h3>{selectedCluster ? `Département ${selectedCluster.department}` : 'Aucune zone'}</h3>
-        <p>{selectedCluster ? `${selectedCluster.count} pharmacie(s), ${formatMoney(selectedCluster.revenue)} de CA suivi, ${selectedCluster.hot} priorité(s).` : 'Le portefeuille ne contient pas encore de pharmacie visible.'}</p>
-        <div className="agent-zero-map-stats">
-          <div><span>Clients</span><strong>{selectedCluster?.count || 0}</strong></div>
-          <div><span>CA suivi</span><strong>{formatMoney(selectedCluster?.revenue || 0)}</strong></div>
-          <div><span>Priorités</span><strong>{selectedCluster?.hot || 0}</strong></div>
-          <div><span>Sélection</span><strong>{selected?.name ? selected.name.split(' ').slice(0, 2).join(' ') : '—'}</strong></div>
-        </div>
-        <div className="agent-zero-priority-stack">
-          {(selectedCluster?.rows || rows).slice(0, 4).map((row) => (
-            <button className={selected?.pharmacyId === row.pharmacyId ? 'is-selected' : ''} key={row.id} onClick={() => setSelectedPharmacyId(row.pharmacyId)} type="button">
-              <strong>{row.name}</strong>
-              <small>{row.city} · {row.signal.action} · {row.nextActionAt ? formatDate(row.nextActionAt) : 'À planifier'}</small>
-            </button>
-          ))}
-        </div>
-      </aside>
-    </div>
-    <div className="agent-zero-table-head"><span>{rows.length} pharmacies</span><span>Client · ville · prochaine action</span></div>
-    <div className="agent-zero-account-list">{rows.map((row) => <button className={selected?.pharmacyId === row.pharmacyId ? 'is-selected' : ''} key={row.id} onClick={() => setSelectedPharmacyId(row.pharmacyId)} type="button"><div><strong>{row.name}</strong><small>{row.city} · Dpt {row.department} · {row.brandName}</small></div><span>{row.signal.action}</span><em>{row.nextActionAt ? formatDate(row.nextActionAt) : 'À planifier'}</em></button>)}</div>
-    <div className="agent-zero-inline-actions"><button onClick={() => onAction('call')} type="button">Appeler</button><button onClick={() => onAction('visit')} type="button">Préparer visite</button><button onClick={() => onAction('order')} type="button">Créer commande</button></div>
-  </div>;
-}
-
-function PortfolioMap({ clusters, onSelectDepartment, onSelectPharmacy, selectedDepartment, selectedPharmacyId }) {
-  const clusterByDepartment = new Map(clusters.map((cluster) => [cluster.department, cluster]));
-  const activeDepartments = new Set(clusters.map((cluster) => cluster.department));
-  const visibleDepartments = FRANCE_DEPARTMENTS.filter((department) => activeDepartments.has(department.code));
-  const pharmacyPoints = clusters.flatMap((cluster) => cluster.rows.map((row, index) => ({
-    ...buildPharmacyMapPoint(row, cluster, index),
-    cluster,
-    row,
-  })));
+  const paidStatuses = ['paid', 'approved', 'to_invoice', 'invoiced'];
+  const commissionRows = orders.map((order) => {
+    const rate = order.order_type === 'implantation' ? 0.20 : 0.15;
+    const base = Number(order.total_ttc || order.total_ht || 0);
+    return { ...order, commissionRate: rate, commissionAmount: base * rate };
+  });
+  const totalCommVersee = commissionRows.filter((o) => paidStatuses.includes(o.status)).reduce((s, o) => s + o.commissionAmount, 0);
+  const totalCommAttendue = commissionRows.reduce((s, o) => s + o.commissionAmount, 0);
 
   return (
-    <div className="agent-zero-map-stage">
-      <svg aria-label="Carte des départements clients de l’agent" className="agent-zero-france-shape" role="img" viewBox={buildMapViewBox(clusters)}>
-        {visibleDepartments.map((department) => {
-          const cluster = clusterByDepartment.get(department.code);
-          return (
-            <path
-              className={`agent-zero-department-path has-clients ${cluster?.hot ? 'is-hot' : ''} ${selectedDepartment === department.code ? 'is-selected' : ''}`}
-              d={department.path}
-              key={department.code}
-              onClick={() => onSelectDepartment(department.code)}
-            >
-              <title>{`${department.code} · ${department.name} · ${cluster.count} client(s)`}</title>
-            </path>
-          );
-        })}
-        {pharmacyPoints.map(({ precise, row, x, y }) => (
-          <g
-            className={`agent-zero-pharmacy-pin ${precise ? 'is-precise' : 'is-approximate'} ${selectedPharmacyId === row.pharmacyId ? 'is-selected' : ''}`}
-            key={row.pharmacyId}
-            onClick={() => onSelectPharmacy(row)}
-            role="button"
-            tabIndex="0"
-            transform={`translate(${x} ${y})`}
-          >
-            <title>{[row.name, row.addressLine1, row.postalCode, row.city, precise ? 'GPS précis' : 'Position approximative département'].filter(Boolean).join(' · ')}</title>
-            <circle r="0.82" />
-            <text y="-1.35">{row.name.split(' ').slice(0, 2).join(' ')}</text>
-          </g>
+    <div className="agent-zero-view">
+      <Header eyebrow="Résultats" title="Suivi commercial" text="Missions terrain, commandes et commissions dans un seul espace." />
+      <div className="agent-zero-results-tabs">
+        {tabs.map(([key, label]) => (
+          <button className={tab === key ? 'is-active' : ''} key={key} onClick={() => setTab(key)} type="button">{label}</button>
         ))}
-      </svg>
-      <div className="agent-zero-map-summary">
-        <span>Départements clients</span>
-        <strong>{clusters.reduce((sum, cluster) => sum + cluster.count, 0)}</strong>
-        <small>pharmacies affichées</small>
       </div>
-      {clusters.map((cluster) => (
-        <button
-          className={`agent-zero-map-zone ${selectedDepartment === cluster.department ? 'is-selected' : ''} ${cluster.hot ? 'is-hot' : ''}`}
-          key={cluster.department}
-          onClick={() => onSelectDepartment(cluster.department)}
-          style={{ '--x': `${cluster.x}%`, '--y': `${cluster.y}%`, '--weight': Math.min(10, cluster.count) }}
-          type="button"
-        >
-          <strong>{cluster.department}</strong>
-          <span>{cluster.count} client{cluster.count > 1 ? 's' : ''}</span>
-          <small>{formatMoney(cluster.revenue)}</small>
-        </button>
-      ))}
-      <div className="agent-zero-map-legend">
-        <span><i /> Département actif</span>
-        <span><i className="is-hot" /> GPS précis</span>
-        <span><i className="is-soft" /> Approx. département</span>
+
+      {tab === 'orders' && (
+        <div>
+          <div className="agent-zero-table-head">
+            <span>{orders.length} commandes</span>
+            <span>Pharmacie · marque · montant · statut</span>
+          </div>
+          <div className="agent-zero-account-list">
+            {orders.length === 0 && <p style={{ padding: '16px', color: 'var(--az-muted)', fontSize: 12 }}>Aucune commande dans le portefeuille.</p>}
+            {orders.map((order) => (
+              <button key={order.id} onClick={() => onAction && onAction('order-detail', order)} type="button">
+                <div>
+                  <strong>{order.pharmacy_name || order.pharmacy_id}</strong>
+                  <small>{order.brand_name || ''} · {order.order_date ? formatDate(order.order_date) : '—'} · {formatLabel(order.order_type || '')}</small>
+                </div>
+                <span>{formatMoney(order.total_ttc || order.total_ht || 0)}</span>
+                <em>{formatLabel(order.status)}</em>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {tab === 'commissions' && (
+        <div>
+          <div className="agent-zero-results-comm-summary">
+            <div>
+              <span>Com. versées</span>
+              <strong>{formatMoney(kpis?.commissionVersee ?? totalCommVersee)}</strong>
+              <small>commandes payées · approuvées</small>
+            </div>
+            <div>
+              <span>Com. attendues</span>
+              <strong>{formatMoney(kpis?.commissionAttendue ?? totalCommAttendue)}</strong>
+              <small>toutes commandes YTD</small>
+            </div>
+            <div>
+              <span>Taux moyen</span>
+              <strong>20% impl. · 15% réassort</strong>
+              <small>selon type de commande</small>
+            </div>
+          </div>
+          <div className="agent-zero-table-head">
+            <span>{commissionRows.length} lignes</span>
+            <span>Pharmacie · commande · taux · commission · statut</span>
+          </div>
+          <div className="agent-zero-account-list">
+            {commissionRows.length === 0 && <p style={{ padding: '16px', color: 'var(--az-muted)', fontSize: 12 }}>Aucune commission calculable.</p>}
+            {commissionRows.map((order) => (
+              <button key={order.id} type="button">
+                <div>
+                  <strong>{order.pharmacy_name || order.pharmacy_id}</strong>
+                  <small>{order.brand_name || ''} · {order.order_date ? formatDate(order.order_date) : '—'} · {formatLabel(order.order_type || '')}</small>
+                </div>
+                <span>{Math.round(order.commissionRate * 100)}% → {formatMoney(order.commissionAmount)}</span>
+                <em>{formatLabel(order.status)}</em>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {tab === 'missions' && (
+        <MissionsTab missions={missions} onCreateMission={onCreateMission} rows={rows} />
+      )}
+    </div>
+  );
+}
+
+function SettingsView({ annualTarget, geocoding, geocodingNotice, googleConnecting, googleConnection, googleNeedsReconnect, googleNotice, googleSyncing, hubspotLineItemsSyncing, hubspotNotice, hubspotSyncing, lastSyncedAt, onAnnualTargetChange, onConnectGoogle, onGeocode, onHubSpotLineItemsSync, onHubSpotSync, onReload, onSignOut, profile }) {
+  const googleConnected = googleConnection?.status === 'connected' && !googleNeedsReconnect;
+  const googleRequiresReconnect = googleConnection?.status === 'connected' && googleNeedsReconnect;
+  return (
+    <div className="agent-zero-view">
+      <Header eyebrow="Réglages" title="Synchronisations & compte" text="Gère les connexions, les syncs de données et les informations de ton compte." />
+      <div className="agent-zero-settings-grid">
+
+        <section className="agent-zero-settings-block">
+          <h3>Objectif commercial</h3>
+          <p>Objectif CA annuel utilisé pour calculer le ratio R/O dans l&apos;onglet Jour. Commissions : 20% implantation · 15% réassort.</p>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap' }}>Objectif CA annuel (€)</span>
+            <input
+              min="0"
+              onChange={(e) => onAnnualTargetChange(Number(e.target.value))}
+              placeholder="ex: 300000"
+              style={{ border: '2px solid var(--az-line)', padding: '5px 8px', fontFamily: 'inherit', fontSize: 12, width: '100%' }}
+              type="number"
+              value={annualTarget || ''}
+            />
+          </label>
+        </section>
+
+        <section className="agent-zero-settings-block">
+          <h3>Données PharmaBiz</h3>
+          <p>Dernière synchronisation : {lastSyncedAt ? formatDateTime(lastSyncedAt) : 'jamais'}</p>
+          <button disabled={false} onClick={onReload} type="button">Synchroniser maintenant</button>
+        </section>
+
+        <section className="agent-zero-settings-block">
+          <h3>HubSpot</h3>
+          <p>Importe les pharmacies, contacts et deals depuis HubSpot CRM.</p>
+          {hubspotNotice && <div className="agent-zero-settings-notice">{hubspotNotice}</div>}
+          <div className="agent-zero-settings-actions">
+            <button disabled={hubspotSyncing} onClick={onHubSpotSync} type="button">{hubspotSyncing ? 'Sync en cours…' : 'Sync HubSpot'}</button>
+            <button disabled={hubspotLineItemsSyncing} onClick={onHubSpotLineItemsSync} type="button">{hubspotLineItemsSyncing ? 'Import en cours…' : 'Importer lignes HubSpot'}</button>
+          </div>
+        </section>
+
+        <section className="agent-zero-settings-block">
+          <h3>Google Agenda</h3>
+          <p>{googleConnected ? 'Agenda connecté — les rendez-vous sont synchronisés automatiquement.' : googleRequiresReconnect ? 'Reconnexion requise — l\'autorisation a expiré.' : 'Connecte Google Agenda pour afficher tes RDV dans l\'onglet Jour.'}</p>
+          {googleNotice && <div className="agent-zero-settings-notice">{googleNotice}</div>}
+          <div className="agent-zero-settings-actions">
+            {googleConnected
+              ? <button disabled={googleSyncing} onClick={() => {}} type="button">{googleSyncing ? 'Sync…' : 'Sync agenda'}</button>
+              : <button disabled={googleConnecting} onClick={onConnectGoogle} type="button">{googleConnecting ? 'Connexion…' : googleRequiresReconnect ? 'Reconnecter Google' : 'Connecter Google Agenda'}</button>}
+          </div>
+        </section>
+
+        <section className="agent-zero-settings-block">
+          <h3>GPS & géocodage</h3>
+          <p>Calcule les coordonnées GPS des pharmacies à partir de leur adresse pour les fonctions de tournée et de carte.</p>
+          {geocodingNotice && <div className="agent-zero-settings-notice">{geocodingNotice}</div>}
+          <button disabled={geocoding} onClick={onGeocode} type="button">{geocoding ? 'Géocodage en cours…' : 'Géocoder le portefeuille'}</button>
+        </section>
+
+        <section className="agent-zero-settings-block">
+          <h3>Compte</h3>
+          <p>{profile?.full_name || 'Agent'} · {profile?.email || ''}</p>
+          <button className="is-danger" onClick={onSignOut} type="button">Se déconnecter</button>
+        </section>
+
       </div>
+    </div>
+  );
+}
+
+function PortfolioView({ activeDepartment, departments, geocoding, onAction, onGeocode, productDistribution, query, rows, selected, setActiveDepartment, setQuery, setSelectedPharmacyId, totalRows }) {
+  const geoReadyCount = rows.filter((r) => Number.isFinite(Number(r.latitude)) && Number.isFinite(Number(r.longitude))).length;
+  const geoMissing = rows.length - geoReadyCount;
+  const [sortCol, setSortCol] = useState('daysSince');
+  const [sortDir, setSortDir] = useState('desc');
+
+  const enrichedRows = useMemo(() => rows.map((row) => {
+    const dn = productDistribution?.pharmacies?.get(row.pharmacyId);
+    const lastOrderDate = row.memory?.lastOrderAt ? new Date(row.memory.lastOrderAt) : null;
+    const daysSince = lastOrderDate ? Math.floor((Date.now() - lastOrderDate.getTime()) / 86400000) : null;
+    return { ...row, caYtd: row.memory?.ytdRevenue || 0, caN1: row.memory?.previousYearRevenue || 0, dnRate: dn?.rate ?? null, dnLabel: dn?.rateLabel ?? '—', lastOrderDate, daysSince };
+  }), [rows, productDistribution]);
+
+  const sortedRows = useMemo(() => [...enrichedRows].sort((a, b) => {
+    if (sortCol === 'name') return sortDir === 'asc' ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name);
+    const vals = { caYtd: [a.caYtd, b.caYtd], caN1: [a.caN1, b.caN1], dn: [a.dnRate ?? -1, b.dnRate ?? -1], daysSince: [a.daysSince ?? 9999, b.daysSince ?? 9999] };
+    const [va, vb] = vals[sortCol] || [0, 0];
+    return sortDir === 'asc' ? va - vb : vb - va;
+  }), [enrichedRows, sortCol, sortDir]);
+
+  function toggleSort(col) {
+    if (sortCol === col) setSortDir((d) => d === 'asc' ? 'desc' : 'asc');
+    else { setSortCol(col); setSortDir('desc'); }
+  }
+
+  function SortBtn({ col, children }) {
+    const active = sortCol === col;
+    return (
+      <button className={`az-th-btn${active ? ' is-active' : ''}`} onClick={() => toggleSort(col)} type="button">
+        {children}<span className="az-sort-arrow">{active ? (sortDir === 'desc' ? ' ↓' : ' ↑') : ' ↕'}</span>
+      </button>
+    );
+  }
+
+  function daysBadge(days) {
+    if (days === null) return <span className="az-days-badge is-none">—</span>;
+    if (days <= 45) return <span className="az-days-badge is-green">{days}j</span>;
+    if (days <= 90) return <span className="az-days-badge is-orange">{days}j</span>;
+    return <span className="az-days-badge is-red">{days}j</span>;
+  }
+
+  return (
+    <div className="agent-zero-view">
+      <div className="agent-zero-portfolio-topbar">
+        <label className="agent-zero-search">
+          <span>⌕</span>
+          <input onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher une pharmacie, une ville…" value={query} />
+        </label>
+        <div className="agent-zero-department-strip" aria-label="Filtrer par département">
+          <button className={activeDepartment === 'all' ? 'is-active' : ''} onClick={() => setActiveDepartment('all')} type="button"><strong>Tous</strong><span>{totalRows}</span></button>
+          {departments.map((item) => <button className={activeDepartment === item.department ? 'is-active' : ''} key={item.department} onClick={() => setActiveDepartment(item.department)} type="button"><strong>{item.department}</strong><span>{item.count}</span></button>)}
+        </div>
+      </div>
+
+      <div className="agent-zero-portfolio-map-full">
+        <div className="agent-zero-map-head">
+          <div>
+            <span>Portfolio terrain</span>
+            <strong>{rows.length} pharmacies · GPS {geoReadyCount}/{rows.length}</strong>
+          </div>
+          <div className="agent-zero-map-legend">
+            <span><i className="order-hot" /> &lt; 45j</span>
+            <span><i className="order-warm" /> 45–90j</span>
+            <span><i className="order-cold" /> &gt; 90j</span>
+            <span><i className="order-none" /> Aucune commande</span>
+          </div>
+          <button className="agent-zero-geocode-btn" disabled={geocoding} onClick={onGeocode} type="button">
+            {geocoding ? 'Géocodage en cours…' : geoMissing > 0 ? `Géocoder ${geoMissing} adresse${geoMissing > 1 ? 's' : ''}` : 'Actualiser GPS'}
+          </button>
+        </div>
+        <PortfolioMap
+          onAction={onAction}
+          onSelectPharmacy={(row) => setSelectedPharmacyId(row.pharmacyId)}
+          rows={rows}
+          selectedPharmacyId={selected?.pharmacyId}
+        />
+      </div>
+
+      <div className="az-portfolio-table-wrap">
+        <div className="az-pg-head">
+          <SortBtn col="name">Pharmacie</SortBtn>
+          <SortBtn col="caYtd">CA YTD</SortBtn>
+          <SortBtn col="caN1">CA N-1</SortBtn>
+          <SortBtn col="dn">DN %</SortBtn>
+          <span>Dernière commande</span>
+          <SortBtn col="daysSince">Jours écoulés</SortBtn>
+          <span>Signal</span>
+        </div>
+        {sortedRows.map((row) => (
+          <div
+            className={`az-pg-row${selected?.pharmacyId === row.pharmacyId ? ' is-selected' : ''}`}
+            key={row.id}
+            onClick={() => setSelectedPharmacyId(row.pharmacyId)}
+          >
+            <div className="az-pt-name">
+              <strong>{row.name}</strong>
+              <small>{row.city} · Dpt {row.department}</small>
+            </div>
+            <div className="az-pt-num">{row.caYtd > 0 ? formatMoney(row.caYtd) : <span className="az-muted">—</span>}</div>
+            <div className="az-pt-num">{row.caN1 > 0 ? formatMoney(row.caN1) : <span className="az-muted">—</span>}</div>
+            <div className="az-pt-num">{row.dnLabel}</div>
+            <div className="az-pt-date">{row.lastOrderDate ? formatDate(row.lastOrderDate) : <span className="az-muted">—</span>}</div>
+            <div className="az-pt-days">{daysBadge(row.daysSince)}</div>
+            <div className="az-pt-signal"><span className={`az-signal-chip is-${row.signal.tone}`}>{row.signal.action}</span></div>
+          </div>
+        ))}
+        {sortedRows.length === 0 && (
+          <div className="az-pt-empty">Aucune pharmacie dans ce filtre.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MapController({ rows, selectedPharmacyId }) {
+  const map = useMap();
+  const fittedKey = useRef(null);
+
+  useEffect(() => {
+    const pts = rows.filter((r) => Number.isFinite(Number(r.latitude)) && Number.isFinite(Number(r.longitude)));
+    if (!pts.length) return;
+    const key = pts.map((r) => r.pharmacyId).join(',');
+    if (fittedKey.current === key) return;
+    fittedKey.current = key;
+    map.fitBounds(pts.map((r) => [Number(r.latitude), Number(r.longitude)]), { padding: [40, 40], maxZoom: 13 });
+  }, [map, rows]);
+
+  useEffect(() => {
+    if (!selectedPharmacyId) return;
+    const row = rows.find((r) => r.pharmacyId === selectedPharmacyId);
+    if (!row || !Number.isFinite(Number(row.latitude))) return;
+    map.flyTo([Number(row.latitude), Number(row.longitude)], Math.max(map.getZoom(), 12), { duration: 0.6 });
+  }, [selectedPharmacyId, map, rows]);
+
+  return null;
+}
+
+function PortfolioMap({ onAction, onSelectPharmacy, rows, selectedPharmacyId }) {
+  const maxRevenue = Math.max(...rows.map((r) => r.revenue || 0), 1);
+  const geoRows = rows.filter((r) => Number.isFinite(Number(r.latitude)) && Number.isFinite(Number(r.longitude)));
+
+  return (
+    <MapContainer center={[46.5, 2.3]} scrollWheelZoom style={{ height: '100%', width: '100%' }} zoom={6}>
+      <TileLayer
+        attribution='© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+        url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+      />
+      <MapController rows={geoRows} selectedPharmacyId={selectedPharmacyId} />
+      {geoRows.map((row) => {
+        const status = pharmacyOrderStatus(row);
+        const radius = 5 + Math.sqrt((row.revenue || 0) / maxRevenue) * 10;
+        return (
+          <CircleMarker
+            center={[Number(row.latitude), Number(row.longitude)]}
+            color="white"
+            eventHandlers={{ click: () => onSelectPharmacy(row) }}
+            fillColor={ORDER_COLORS[status]}
+            fillOpacity={0.88}
+            key={row.pharmacyId}
+            radius={radius}
+            weight={selectedPharmacyId === row.pharmacyId ? 3 : 1.5}
+          >
+            <Popup>
+              <div className="az-map-popup">
+                <strong>{row.name}</strong>
+                <em>{row.city} · Dpt {row.department}</em>
+                {row.revenue > 0 && <span>CA {formatMoney(row.revenue)}</span>}
+                {row.memory?.lastOrderAt && <span>Dernière commande {formatDate(row.memory.lastOrderAt)}</span>}
+                <div className="az-map-popup-actions">
+                  <button onClick={() => onAction('report', row)} type="button">CR</button>
+                  <button onClick={() => onAction('order', row)} type="button">Cmd</button>
+                  <button onClick={() => onAction('visit', row)} type="button">+RDV</button>
+                </div>
+              </div>
+            </Popup>
+          </CircleMarker>
+        );
+      })}
+    </MapContainer>
+  );
+}
+
+function TourView({ calendarEvents, geocoding, onAction, onGeocode, rows, todayItems }) {
+  const plannedItems = useMemo(() => buildCalendarItems(calendarEvents, rows)
+    .concat(todayItems.filter((item) => item.kind === 'activity'))
+    .filter((item) => item.startDate)
+    .sort((a, b) => a.startDate - b.startDate), [calendarEvents, rows, todayItems]);
+
+  const route = useMemo(() => buildDayRoute(rows, plannedItems), [rows, plannedItems]);
+
+  const mapsMultiStopUrl = useMemo(() => {
+    const geoStops = route.stops.filter((s) => Number.isFinite(Number(s.latitude)) && Number.isFinite(Number(s.longitude)));
+    if (geoStops.length < 2) return null;
+    const waypoints = geoStops.map((s) => `${s.latitude},${s.longitude}`).join('/');
+    return `https://www.google.com/maps/dir/${waypoints}`;
+  }, [route.stops]);
+
+  const geoReadyCount = route.geoCount;
+  const totalGps = rows.filter((r) => Number.isFinite(Number(r.latitude)) && Number.isFinite(Number(r.longitude))).length;
+  const routeStopIds = new Set(route.stops.map((s) => s.pharmacyId));
+  const clusters = useMemo(() => buildDepartmentClusters(rows), [rows]);
+  const [selectedStopId, setSelectedStopId] = useState(null);
+
+  return (
+    <div className="agent-zero-view">
+      <Header
+        eyebrow="Tournée terrain"
+        title="Itinéraire du jour"
+        text={`${geoReadyCount} pharmacies géolocalisées sur ${rows.length} · optimisation par proximité et priorité`}
+      />
+
+      <div className="agent-zero-tour-summary">
+        <div><span>Stops planifiés</span><strong>{route.stops.length}</strong></div>
+        <div><span>Distance estimée</span><strong>{route.totalKm > 0 ? `${route.totalKm} km` : '—'}</strong><small>vol d&apos;oiseau</small></div>
+        <div><span>GPS disponibles</span><strong>{totalGps}/{rows.length}</strong></div>
+        {mapsMultiStopUrl && (
+          <div>
+            <a className="agent-zero-tour-maps-btn" href={mapsMultiStopUrl} rel="noreferrer" target="_blank">
+              Ouvrir dans Maps
+            </a>
+          </div>
+        )}
+      </div>
+
+      <div className="agent-zero-tour-map-wrap">
+        <PortfolioMap
+          clusters={clusters}
+          onSelectDepartment={() => {}}
+          onSelectPharmacy={(row) => setSelectedStopId(row.pharmacyId)}
+          selectedDepartment={null}
+          selectedPharmacyId={selectedStopId}
+        />
+        {route.stops.length > 0 && (
+          <div className="agent-zero-tour-map-legend">
+            {route.stops.map((s) => (
+              <button
+                className={selectedStopId === s.pharmacyId ? 'is-active' : ''}
+                key={s.pharmacyId}
+                onClick={() => setSelectedStopId(s.pharmacyId)}
+                type="button"
+              >
+                <b>{s.stopIndex}</b>
+                <span>{s.name}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {route.stops.length === 0 && (
+        <div className="agent-zero-empty-state">
+          <p>Aucune pharmacie géolocalisée ou priorisée pour construire un itinéraire.</p>
+          <button disabled={geocoding} onClick={onGeocode} style={{ marginTop: 12 }} type="button">
+            {geocoding ? 'Géocodage…' : 'Géocoder le portefeuille'}
+          </button>
+        </div>
+      )}
+
+      <div className="agent-zero-tour-stops">
+        {route.stops.map((stop, idx) => (
+          <div className={`agent-zero-tour-stop ${stop.fromCalendar ? 'is-calendar' : ''}`} key={stop.pharmacyId || idx}>
+            {idx > 0 && stop.distKm !== null && (
+              <div className="agent-zero-tour-leg">
+                <span>{Math.round(stop.distKm)} km</span>
+              </div>
+            )}
+            <div className="agent-zero-tour-stop-card">
+              <div className="agent-zero-tour-stop-index">{stop.stopIndex}</div>
+              <div className="agent-zero-tour-stop-body">
+                <strong>{stop.name}</strong>
+                <small>{stop.city} · Dpt {stop.department} · {stop.signal?.action || 'À préparer'}</small>
+              </div>
+              {stop.time && <em className="agent-zero-tour-stop-time">{stop.time}</em>}
+              <div className="agent-zero-tour-stop-actions">
+                {Number.isFinite(Number(stop.latitude)) && (
+                  <a href={buildMapsUrl(stop)} rel="noreferrer" target="_blank">Maps</a>
+                )}
+                <button onClick={() => onAction('visit', stop)} type="button">Préparer</button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {route.opportunities.length > 0 && (
+        <div className="agent-zero-tour-opps">
+          <h3>Opportunités de passage</h3>
+          <p>Pharmacies proches de ta tournée, non planifiées</p>
+          <div>
+            {route.opportunities.map((row) => (
+              <button key={row.pharmacyId} onClick={() => onAction('visit', row)} type="button">
+                <div>
+                  <strong>{row.name}</strong>
+                  <small>{row.city} · {Math.round(row.minDist)} km du trajet · {row.signal?.action}</small>
+                </div>
+                <b>+</b>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {totalGps < rows.length && (
+        <div className="agent-zero-tour-geocode-notice">
+          <span>{rows.length - totalGps} pharmacies sans coordonnées GPS</span>
+          <button disabled={geocoding} onClick={onGeocode} type="button">
+            {geocoding ? 'Géocodage…' : 'Compléter le géocodage'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
 function VisitView({ onAction, selected }) {
-  return <div className="agent-zero-view"><Header eyebrow="Préparation visite" title={selected?.name || 'Choisis une pharmacie'} text="Objectif : arriver avec le contexte, l’historique et la prochaine action claire." />
+  return <div className="agent-zero-view"><Header eyebrow="Préparation visite" title={selected?.name || 'Choisis une pharmacie'} text="Objectif : arriver avec le contexte, l'historique et la prochaine action claire." />
     <div className="agent-zero-visit-card"><span>Brief terrain</span><strong>{selected ? `${selected.brandName} · ${selected.city}` : 'Aucune pharmacie sélectionnée'}</strong><p>{selected ? `Statut ${formatLabel(selected.status)}. Dernier contact : ${formatDate(selected.lastContactAt)}. CA suivi : ${formatMoney(selected.revenue)}.` : 'Sélectionne un compte dans le portefeuille pour préparer une visite.'}</p></div>
     {selected && <TerrainSignal signal={selected.signal} />}
     {selected && <CustomerMemory memory={selected.memory} />}
@@ -1374,13 +2259,61 @@ function ActionDrawer({ action, googleConnected, onClose, onCreateActivity, onCr
   const [selectedProducts, setSelectedProducts] = useState({});
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
-  const labels = { call: 'Appel', visit: 'Visite', order: 'Commande', note: 'Compte rendu', followup: 'Relance' };
-  const activityTypes = { call: 'call', visit: 'visit', note: 'note' };
+  const labels = { call: 'Appel', visit: 'Visite', order: 'Commande', note: 'Compte rendu', followup: 'Relance', report: 'CR de visite' };
+  const activityTypes = { call: 'call', visit: 'visit', note: 'note', report: 'visit' };
   const isFollowUp = action.type === 'followup';
   const isOrder = action.type === 'order';
   const isVisit = action.type === 'visit';
+  const isCR = action.type === 'report';
+
+  const CR_OUTCOMES = [
+    { key: 'order', label: 'Commande prise', icon: '✓' },
+    { key: 'rdv', label: 'RDV pris', icon: '📅' },
+    { key: 'presented', label: 'Présentés sans suite', icon: '📝' },
+    { key: 'absent', label: 'Absent / Indispo', icon: '📵' },
+    { key: 'refused', label: 'Refus', icon: '✗' },
+  ];
+  const CR_NEXT_ACTIONS = [
+    { key: '7', label: 'Relancer dans 7j' },
+    { key: '14', label: 'Relancer dans 14j' },
+    { key: '30', label: 'Relancer dans 30j' },
+    { key: 'none', label: 'Rien pour l\'instant' },
+  ];
+  const [crOutcome, setCrOutcome] = useState('');
+  const [crNextAction, setCrNextAction] = useState('14');
+  const [crMentioned, setCrMentioned] = useState({});
+
+  function toggleMentioned(productId) {
+    setCrMentioned((prev) => ({ ...prev, [productId]: !prev[productId] }));
+  }
+
+  function buildCRNote() {
+    const outcomeLabel = CR_OUTCOMES.find((o) => o.key === crOutcome)?.label || '';
+    const mentionedNames = brandProducts.filter((p) => crMentioned[p.id]).map((p) => p.name).join(' · ') || 'Aucun';
+    const nextLabel = CR_NEXT_ACTIONS.find((a) => a.key === crNextAction)?.label || '';
+    return [
+      `CR visite — ${action.row?.name} — ${new Date().toLocaleDateString('fr-FR')}`,
+      `Résultat : ${outcomeLabel}`,
+      `Produits évoqués : ${mentionedNames}`,
+      `Prochaine action : ${nextLabel}`,
+      note ? `Notes : ${note}` : '',
+    ].filter(Boolean).join('\n');
+  }
+
+  function copyWhatsApp() {
+    navigator.clipboard?.writeText(buildCRNote());
+  }
   const brandId = action.row?.relation?.brand_id || null;
-  const brandProducts = (products || []).filter((product) => !brandId || product.brand_id === brandId);
+  const referencedNames = useMemo(() => {
+    const refs = readArray(action.row?.catalogueNaaliReference);
+    return refs.length ? new Set(refs.map((name) => normalize(name))) : null;
+  }, [action.row?.catalogueNaaliReference]);
+
+  const brandProducts = (products || []).filter((product) => {
+    if (brandId && product.brand_id !== brandId) return false;
+    if (!referencedNames) return false;
+    return referencedNames.has(normalize(product.name));
+  });
   const filteredProducts = brandProducts.filter((product) => normalize([
     product.name,
     product.reference,
@@ -1461,13 +2394,28 @@ function ActionDrawer({ action, googleConnected, onClose, onCreateActivity, onCr
         reason: note || `Relance planifiée depuis la fiche ${action.row?.name}.`,
         title: `Relancer ${action.row?.name}`,
       });
+    } else if (isCR) {
+      const crNote = buildCRNote();
+      result = await onCreateActivity?.({
+        ...common,
+        activityDate: new Date().toISOString(),
+        notes: crNote,
+        title: `CR visite · ${action.row?.name}`,
+        type: 'visit',
+      });
+      if (!result?.error && crNextAction !== 'none') {
+        const daysMap = { '7': 7, '14': 14, '30': 30 };
+        const days = daysMap[crNextAction] || 14;
+        const dueAt = new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+        await onCreateFollowUp?.({ ...common, dueAt, priority: 'medium', title: `Relancer ${action.row?.name}`, reason: `Suite CR visite du ${new Date().toLocaleDateString('fr-FR')}` });
+      }
     } else {
       const plannedVisitAt = isVisit ? `${visitDate}T${visitTime}:00` : null;
       result = await onCreateActivity?.({
         ...common,
         activityDate: plannedVisitAt,
         durationMinutes: isVisit ? durationMinutes : null,
-        notes: note || `${labels[action.type] || 'Action'} enregistrée depuis l’espace agent.`,
+        notes: note || `${labels[action.type] || 'Action'} enregistrée depuis l'espace agent.`,
         syncGoogleCalendar: isVisit && googleConnected && syncVisitCalendar,
         title: `${labels[action.type] || 'Action'} · ${action.row?.name}`,
         type: activityTypes[action.type] || 'note',
@@ -1504,7 +2452,7 @@ function ActionDrawer({ action, googleConnected, onClose, onCreateActivity, onCr
           <div><span className="agent-zero-kicker">Action terrain</span><h2>{labels[action.type] || 'Action'} · {action.row?.name}</h2></div>
           <button onClick={onClose} type="button">×</button>
         </div>
-        <p>{isOrder ? 'Crée un brouillon commande rattaché à la pharmacie et à ton portefeuille.' : isFollowUp ? 'Planifie une relance terrain rattachée à cette pharmacie.' : isVisit ? 'Planifie une visite terrain et ajoute-la à ton agenda si Google est connecté.' : 'Enregistre immédiatement cette action dans l’historique terrain.'}</p>
+        <p>{isOrder ? 'Crée un brouillon commande rattaché à la pharmacie et à ton portefeuille.' : isFollowUp ? 'Planifie une relance terrain rattachée à cette pharmacie.' : isVisit ? 'Planifie une visite terrain et ajoute-la à ton agenda si Google est connecté.' : isCR ? 'Compte rendu rapide — à remplir à chaud, en moins de 30 secondes.' : 'Enregistre immédiatement cette action dans l\'historique terrain.'}</p>
         <div className="agent-zero-drawer-grid">
           <div><span>Pharmacie</span><strong>{action.row?.name}</strong></div>
           <div><span>Marque</span><strong>{action.row?.brandName}</strong></div>
@@ -1512,6 +2460,58 @@ function ActionDrawer({ action, googleConnected, onClose, onCreateActivity, onCr
           <div><span>Priorité</span><strong>{formatLabel(action.row?.priority)}</strong></div>
         </div>
         <form className="agent-zero-action-form" onSubmit={submit}>
+          {isCR && (
+            <div className="agent-zero-cr-form">
+              <div className="agent-zero-cr-section">
+                <span>Résultat de la visite</span>
+                <div className="agent-zero-cr-outcomes">
+                  {CR_OUTCOMES.map((o) => (
+                    <button
+                      className={crOutcome === o.key ? 'is-active' : ''}
+                      key={o.key}
+                      onClick={() => setCrOutcome(o.key)}
+                      type="button"
+                    >
+                      {o.icon} {o.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="agent-zero-cr-section">
+                <span>Produits évoqués</span>
+                <div className="agent-zero-cr-products">
+                  {brandProducts.length === 0 && (
+                    <span style={{ fontSize: 11, color: 'var(--az-muted)' }}>
+                      {!referencedNames ? 'Champ "Catalogue Naali référencé" vide dans HubSpot pour cette pharmacie.' : 'Aucun produit référencé.'}
+                    </span>
+                  )}
+                  {brandProducts.slice(0, 12).map((p) => (
+                    <label className={crMentioned[p.id] ? 'is-checked' : ''} key={p.id}>
+                      <input checked={!!crMentioned[p.id]} onChange={() => toggleMentioned(p.id)} type="checkbox" />
+                      {p.name}
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div className="agent-zero-cr-section">
+                <span>Prochaine action</span>
+                <div className="agent-zero-cr-next">
+                  {CR_NEXT_ACTIONS.map((a) => (
+                    <button
+                      className={crNextAction === a.key ? 'is-active' : ''}
+                      key={a.key}
+                      onClick={() => setCrNextAction(a.key)}
+                      type="button"
+                    >
+                      {a.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <label><span>Note libre (optionnel)</span><textarea onChange={(event) => setNote(event.target.value)} placeholder="Remarques, infos terrain, contexte…" rows="2" value={note} /></label>
+              <button className="agent-zero-cr-whatsapp" onClick={copyWhatsApp} type="button">📋 Copier pour WhatsApp</button>
+            </div>
+          )}
           {isFollowUp && <label><span>Date de relance</span><input onChange={(event) => setDueAt(event.target.value)} type="date" value={dueAt} /></label>}
           {isVisit && (
             <div className="agent-zero-visit-scheduler">
@@ -1546,7 +2546,7 @@ function ActionDrawer({ action, googleConnected, onClose, onCreateActivity, onCr
                     </article>
                   );
                 })}
-                {!filteredProducts.length && <div className="agent-zero-empty"><strong>Aucun produit trouvé</strong><span>Vérifie le catalogue ou ajuste ta recherche.</span></div>}
+                {!filteredProducts.length && <div className="agent-zero-empty"><strong>Aucun produit référencé</strong><span>{!referencedNames ? 'Le champ "Catalogue Naali référencé" est vide sur cette pharmacie dans HubSpot.' : 'Aucun produit correspond à ta recherche.'}</span></div>}
               </div>
               <div className="agent-zero-order-total"><span>{selectedLines.length} lignes · remise {formatMoney(selectedDiscountAmount)}</span><strong>{formatMoney(selectedTotal)} HT</strong></div>
             </div>
@@ -1554,7 +2554,7 @@ function ActionDrawer({ action, googleConnected, onClose, onCreateActivity, onCr
           <label><span>{isOrder ? 'Note commande' : isFollowUp ? 'Motif' : isVisit ? 'Objectif de visite' : 'Compte rendu rapide'}</span><textarea onChange={(event) => setNote(event.target.value)} placeholder={isVisit ? 'Ex. Réassort, implantation, formation équipe…' : 'Ajoute une note courte…'} rows="4" value={note} /></label>
           {!isOrder && !isFollowUp && !isVisit && <label><span>Prochaine action optionnelle</span><input onChange={(event) => setNextActionAt(event.target.value)} type="date" value={nextActionAt} /></label>}
           {message && <div className={message.includes('introuvable') || message.includes('Sélectionne') ? 'agent-zero-form-message is-error' : 'agent-zero-form-message'}>{message}</div>}
-          <button className="agent-zero-confirm" disabled={saving} type="submit">{saving ? 'Enregistrement…' : isOrder ? 'Créer le brouillon' : isFollowUp ? 'Planifier la relance' : isVisit ? 'Planifier la visite' : 'Enregistrer l’action'}</button>
+          <button className="agent-zero-confirm" disabled={saving} type="submit">{saving ? 'Enregistrement...' : isOrder ? 'Créer le brouillon' : isFollowUp ? 'Planifier la relance' : isVisit ? 'Planifier la visite' : isCR ? 'Enregistrer le CR' : "Enregistrer l'action"}</button>
         </form>
       </aside>
     </div>
